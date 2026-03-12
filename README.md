@@ -24,3 +24,6 @@ MindPass is a privacy-preserving DApp prototype for mental-health record proof a
 - contracts/: smart contract files and deployment notes
 - frontend/: website or DApp frontend files
 - meeting-notes/: meeting records and task allocations
+
+
+Repository setup completed locally.
