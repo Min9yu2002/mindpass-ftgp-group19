@@ -1,0 +1,32 @@
+{
+  "name": "mindpass-ftgp-group19",
+  "version": "1.0.0",
+  "description": "FTGP group project repository for MindPass MVP.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Min9yu2002/mindpass-ftgp-group19.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Min9yu2002/mindpass-ftgp-group19/issues"
+  },
+  "homepage": "https://github.com/Min9yu2002/mindpass-ftgp-group19#readme",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^7.0.0",
+    "dotenv": "^17.3.1",
+    "hardhat": "^2.28.6"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.6.1"
+  }
+}
