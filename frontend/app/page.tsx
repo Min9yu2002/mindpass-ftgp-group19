@@ -2,7 +2,11 @@ import Link from "next/link";
 import FeatureCard from "../components/FeatureCard";
 import GlassCard from "../components/GlassCard";
 import SectionHeading from "../components/SectionHeading";
-import { mockTherapists } from "../lib/mock-therapists";
+import { createServerSupabaseClient } from "../lib/supabase-server";
+import {
+  getTherapistDisplayName,
+  getTherapistDisplaySpecialty,
+} from "../lib/therapist-display";
 
 const features = [
   {
@@ -43,7 +47,140 @@ const steps = [
   },
 ];
 
-export default function Home() {
+function normalizeLanguages(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item)).filter(Boolean);
+  }
+
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function normalizeSupportedModes(value: unknown): ("Voice" | "Text")[] {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(",")
+      : [];
+
+  return values
+    .map((item) => String(item).trim().toLowerCase())
+    .filter(Boolean)
+    .map((item) => (item === "voice" || item === "video" ? "Voice" : "Text"))
+    .filter((item, index, array) => array.indexOf(item) === index) as (
+    | "Voice"
+    | "Text"
+  )[];
+}
+
+function deriveModeLabel(supportedModes: ("Voice" | "Text")[]) {
+  if (supportedModes.includes("Voice") && supportedModes.includes("Text")) {
+    return "Hybrid";
+  }
+
+  if (supportedModes.includes("Voice")) {
+    return "Voice";
+  }
+
+  if (supportedModes.includes("Text")) {
+    return "Text";
+  }
+
+  return "Not Available";
+}
+
+export default async function Home() {
+  let verifiedTherapistCount = 0;
+  let onlineTherapistCount = 0;
+  let therapistPreviewCards = [
+    {
+      id: "placeholder-therapist",
+      name: "Verified therapist",
+      specialty: "Mental health support",
+      languages: ["English"],
+      mode: "Hybrid",
+      availability: "Availability syncing",
+      isOnline: false,
+    },
+  ];
+  let recommendedTherapist = {
+    name: "Verified therapist",
+    specialty: "Mental health support",
+    languages: ["English"],
+    mode: "Hybrid",
+    availability: "Availability syncing",
+  };
+
+  try {
+    const supabase = createServerSupabaseClient();
+    const { data, error } = await supabase
+      .from("therapists")
+      .select(
+        "id, wallet_address, full_name, legal_name, specialty, clinical_specialty, bio, languages, ekyc_status, sbt_minted, is_online, rating, supported_modes",
+      )
+      .order("is_online", { ascending: false })
+      .order("rating", { ascending: false });
+
+    if (!error) {
+      const therapists = (data ?? []).filter((therapist) => {
+        const ekycStatus = String(therapist.ekyc_status ?? "").toLowerCase();
+        const sbtMinted =
+          therapist.sbt_minted === true ||
+          String(therapist.sbt_minted ?? "").toLowerCase() === "true";
+
+        return ekycStatus === "verified" && sbtMinted;
+      });
+
+      verifiedTherapistCount = therapists.length;
+      onlineTherapistCount = therapists.filter((therapist) =>
+        Boolean(therapist.is_online),
+      ).length;
+      therapistPreviewCards = therapists.map((therapist, index) => {
+        const supportedModes = normalizeSupportedModes(therapist.supported_modes);
+        const languages = normalizeLanguages(therapist.languages);
+        const isOnline = Boolean(therapist.is_online);
+        const displayName = getTherapistDisplayName(therapist);
+        const displaySpecialty = getTherapistDisplaySpecialty(therapist);
+
+        return {
+          id: String(
+            therapist.id ?? therapist.wallet_address ?? `therapist-${index}`,
+          ),
+          name: displayName,
+          specialty: displaySpecialty,
+          languages: languages.length > 0 ? languages.slice(0, 3) : ["English"],
+          mode: deriveModeLabel(supportedModes),
+          availability: isOnline ? "Available now" : "Currently offline",
+          isOnline,
+        };
+      });
+
+      const topTherapist = therapists[0];
+      if (topTherapist) {
+        const supportedModes = normalizeSupportedModes(topTherapist.supported_modes);
+        const isOnline = Boolean(topTherapist.is_online);
+        const displayName = getTherapistDisplayName(topTherapist);
+        const displaySpecialty = getTherapistDisplaySpecialty(topTherapist);
+        recommendedTherapist = {
+          name: displayName,
+          specialty: displaySpecialty,
+          languages: normalizeLanguages(topTherapist.languages).slice(0, 3),
+          mode: deriveModeLabel(supportedModes),
+          availability: isOnline ? "Available now" : "Currently offline",
+        };
+      }
+    }
+  } catch {
+    verifiedTherapistCount = 0;
+    onlineTherapistCount = 0;
+  }
+
   return (
     <main className="app-shell page-canvas page-canvas-violet relative overflow-hidden pt-32 md:pt-36">
       <div className="mx-auto w-full max-w-7xl px-6 py-8 lg:px-10">
@@ -68,12 +205,12 @@ export default function Home() {
                     htmlFor="support-code"
                     className="mb-2 block text-xs uppercase tracking-[0.18em] text-[var(--text-faint)]"
                   >
-                    Secure entry
+                    GOV SUBSIDY ENTRY
                   </label>
                   <input
                     id="support-code"
                     type="text"
-                    placeholder="Enter support code"
+                    placeholder="Enter Gov Support Code (e.g., NHS-2026)"
                     className="w-full bg-transparent text-base text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]"
                   />
                 </div>
@@ -81,30 +218,41 @@ export default function Home() {
                   type="button"
                   className="button-primary rounded-[22px] px-5 py-4 text-sm font-medium"
                 >
-                  Verify Access
+                  Verify & Claim
                 </button>
               </div>
-              <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                <Link
-                  href="/dashboard"
-                  className="text-sm font-medium text-violet-200 transition hover:text-violet-100"
-                >
-                  Browse Therapists
-                </Link>
-                <Link
-                  href="/auth"
-                  className="text-sm text-[var(--text-muted)] transition hover:text-white"
-                >
-                  Create an account
-                </Link>
+              <div className="mt-4 flex flex-col gap-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  <Link
+                    href="/therapists"
+                    className="inline-flex items-center justify-center rounded-full border border-white/20 bg-white/5 px-6 py-3 text-sm font-medium text-[var(--text-primary)] transition hover:bg-white/10"
+                  >
+                    Browse Therapists
+                  </Link>
+                  <Link
+                    href="/auth"
+                    className="button-primary inline-flex items-center justify-center rounded-full px-6 py-3 text-sm font-medium"
+                  >
+                    Get Started
+                  </Link>
+                </div>
+                <p className="text-sm text-[var(--text-muted)]">
+                  Need a code?{" "}
+                  <a
+                    href="#"
+                    className="transition hover:text-[var(--text-primary)]"
+                  >
+                    Claim from Gov Portal ↗
+                  </a>
+                </p>
               </div>
             </GlassCard>
 
             <div id="therapists" className="section-anchor mt-10 grid gap-4 sm:grid-cols-3">
               <div className="liquid-glass-soft rounded-[24px] px-4 py-4">
-                <p className="text-sm text-[var(--text-muted)]">Therapists in demo</p>
+                <p className="text-sm text-[var(--text-muted)]">Therapists</p>
                 <p className="mt-2 text-2xl font-semibold text-white">
-                  {mockTherapists.length}
+                  {verifiedTherapistCount}
                 </p>
               </div>
               <div className="liquid-glass-soft rounded-[24px] px-4 py-4">
@@ -124,33 +272,76 @@ export default function Home() {
                 <p className="text-xs uppercase tracking-[0.24em] text-[var(--text-faint)]">
                   Care Portal Preview
                 </p>
-                <h2 className="mt-3 text-2xl font-semibold text-white">
+                <h2 className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
                   A clearer care entry surface
                 </h2>
               </div>
-              <div className="glass-chip px-3 py-1 text-xs text-violet-100/85">
+              <div className="glass-chip px-3 py-1 text-xs text-[var(--preview-badge-text)]">
                 Preview
               </div>
             </div>
 
             <div className="grid gap-4">
-              <div className="grid gap-4 md:grid-cols-[1fr_0.9fr]">
+              <div className="grid gap-4 md:grid-cols-[1.2fr_0.8fr]">
                 <div className="liquid-glass-soft rounded-[24px] p-4">
-                  <p className="text-sm text-[var(--text-muted)]">Recommended fit</p>
-                  <p className="mt-3 text-xl font-semibold text-white">
-                    {mockTherapists[0]?.name}
-                  </p>
-                  <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
-                    {mockTherapists[0]?.specialty}
-                  </p>
-                  <div className="mt-5 flex flex-wrap gap-2">
-                    {mockTherapists[0]?.languages.map((language) => (
-                      <span
-                        key={language}
-                        className="glass-chip-muted px-3 py-1 text-xs text-white/68"
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm text-[var(--text-muted)]">Recommended fit</p>
+                    </div>
+                    <Link
+                      href="/therapists"
+                      className="glass-chip-muted px-3 py-1 text-xs text-[var(--chip-text-muted)] transition hover:text-[var(--text-primary)]"
+                    >
+                      View all
+                    </Link>
+                  </div>
+
+                  <div className="preview-scrollbar -mx-1 flex snap-x snap-mandatory gap-3 overflow-x-auto px-1 pb-5 pr-6">
+                    {therapistPreviewCards.map((therapist) => (
+                      <article
+                        key={therapist.id}
+                        className="liquid-glass-soft min-w-[240px] snap-start rounded-[22px] p-4"
                       >
-                        {language}
-                      </span>
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-base font-semibold text-[var(--text-primary)]">
+                              {therapist.name}
+                            </p>
+                            <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
+                              {therapist.specialty}
+                            </p>
+                          </div>
+                          <span
+                            className={`glass-chip px-3 py-1 text-xs ${
+                              therapist.isOnline
+                                ? "text-[var(--status-online-text)]"
+                                : "text-[var(--status-offline-text)]"
+                            }`}
+                          >
+                            {therapist.isOnline ? "Online" : "Offline"}
+                          </span>
+                        </div>
+
+                        <div className="mt-5 flex flex-wrap gap-2">
+                          {therapist.languages.map((language) => (
+                            <span
+                              key={`${therapist.id}-${language}`}
+                              className="glass-chip-muted px-3 py-1 text-xs text-[var(--chip-text-muted)]"
+                            >
+                              {language}
+                            </span>
+                          ))}
+                        </div>
+
+                        <div className="mt-5 flex items-center justify-between gap-3 text-sm">
+                          <span className="glass-chip-muted px-3 py-1 text-xs text-[var(--chip-text)]">
+                            {therapist.mode}
+                          </span>
+                          <span className="text-[var(--text-muted)]">
+                            {therapist.availability}
+                          </span>
+                        </div>
+                      </article>
                     ))}
                   </div>
                 </div>
@@ -159,9 +350,9 @@ export default function Home() {
                   <p className="text-sm text-[var(--text-muted)]">Current flow</p>
                   <div className="mt-4 space-y-3">
                     {[
-                      "Access code reviewed",
-                      "Therapist shortlist prepared",
-                      "Protected booking handoff ready",
+                      `${verifiedTherapistCount} verified therapists indexed`,
+                      `${onlineTherapistCount} therapists currently online`,
+                      `${recommendedTherapist.mode} sessions ready for booking`,
                     ].map((item) => (
                       <div
                         key={item}
@@ -169,7 +360,7 @@ export default function Home() {
                       >
                         <div className="flex items-center gap-3">
                           <span className="h-2.5 w-2.5 rounded-full bg-violet-300 shadow-[0_0_18px_rgba(180,170,255,0.8)]" />
-                          <span className="text-sm text-white/74">{item}</span>
+                          <span className="text-sm text-[var(--text-secondary)]">{item}</span>
                         </div>
                       </div>
                     ))}
@@ -181,11 +372,11 @@ export default function Home() {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm text-[var(--text-muted)]">Session preview</p>
-                    <p className="mt-2 text-lg font-semibold text-white">
+                    <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">
                       Protected support session
                     </p>
                   </div>
-                  <div className="glass-highlight rounded-full px-3 py-1 text-xs text-violet-100">
+                  <div className="glass-highlight rounded-full px-3 py-1 text-xs text-[var(--preview-badge-text)]">
                     Intake-ready
                   </div>
                 </div>
@@ -194,19 +385,19 @@ export default function Home() {
                     <p className="text-xs uppercase tracking-[0.16em] text-[var(--text-faint)]">
                       Mode
                     </p>
-                    <p className="mt-2 text-sm text-white">Video session</p>
+                    <p className="mt-2 text-sm text-[var(--text-primary)]">{recommendedTherapist.mode} session</p>
                   </div>
                   <div className="liquid-glass-soft rounded-2xl px-3 py-3">
                     <p className="text-xs uppercase tracking-[0.16em] text-[var(--text-faint)]">
                       Access
                     </p>
-                    <p className="mt-2 text-sm text-white">Code verified</p>
+                    <p className="mt-2 text-sm text-[var(--text-primary)]">Wallet verified</p>
                   </div>
                   <div className="liquid-glass-soft rounded-2xl px-3 py-3">
                     <p className="text-xs uppercase tracking-[0.16em] text-[var(--text-faint)]">
                       Next step
                     </p>
-                    <p className="mt-2 text-sm text-white">Confirm booking</p>
+                    <p className="mt-2 text-sm text-[var(--text-primary)]">{recommendedTherapist.availability}</p>
                   </div>
                 </div>
               </div>

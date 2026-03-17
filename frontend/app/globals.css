@@ -67,3 +67,24 @@ body {
     radial-gradient(circle at 12% 10%, rgba(116, 82, 255, 0.14), transparent 28%),
     radial-gradient(circle at 80% 20%, rgba(74, 144, 226, 0.1), transparent 25%);
 }
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background-color: transparent;
+}
+
+::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.2);
+  border-radius: 9999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.4);
+}

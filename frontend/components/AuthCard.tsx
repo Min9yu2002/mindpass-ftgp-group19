@@ -1,145 +1,219 @@
 "use client";
 
-import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { formatEther } from "viem";
+import { useAccount, useBalance } from "wagmi";
 import GlassCard from "./GlassCard";
 import AuthTabs from "./AuthTabs";
 import StatusBadge from "./StatusBadge";
+import WalletConnectButton from "./WalletConnectButton";
+import { supabase } from "../lib/supabase";
 
-type AuthMode = "create" | "login" | "therapist";
+type AuthMode = "create" | "login";
 
 type AuthCardProps = {
   initialMode?: AuthMode;
 };
 
-const DEMO_PATIENT_WALLET =
-  "0x60eCc43Eb6d34AFF650ee3BA18299dB4916fbd39";
-const DEMO_THERAPIST_WALLET =
-  "0x8Ec7F2F349111B2443A6C68691344B7d53d5B2cD";
-const EASTER_EGG_WALLET = DEMO_PATIENT_WALLET.toLowerCase();
-const EASTER_EGG_USERNAME = "M1n9yu_3an9";
-
 export default function AuthCard({ initialMode = "create" }: AuthCardProps) {
-  const [mode, setMode] = useState<AuthMode>(initialMode);
-  const [username, setUsername] = useState("");
-  const [redeemCode, setRedeemCode] = useState(""); // 新增：政府認證碼狀態
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [errorMessage, setErrorMessage] = useState("");
   const router = useRouter();
+  const { address, isConnected } = useAccount();
+  const { data: balanceData } = useBalance({ address });
+  const [mode, setMode] = useState<AuthMode>(initialMode);
+  const [supportCode, setSupportCode] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isCheckingLogin, setIsCheckingLogin] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
 
   const content = useMemo(() => {
     if (mode === "login") {
       return {
-        title: "Access your vault",
+        title: "Access your existing vault",
         description:
-          "Enter your anonymous username and connect your wallet to decrypt your session history.",
-        buttonLabel: "Connect Wallet to Log In",
-      };
-    }
-
-    if (mode === "therapist") {
-      return {
-        title: "Verify SBT Credentials",
-        description:
-          "Therapist identities are verified exclusively via on-chain Soulbound Tokens. No username required.",
-        buttonLabel: "Connect Wallet & Verify",
+          "Already have a vault? Just connect your wallet. Our system will securely verify your key and grant you instant access.",
+        buttonLabel: "Connect Wallet",
       };
     }
 
     return {
-      title: "Create secure profile",
+      title: "Initialize your anonymous vault",
       description:
-        "Enter your government support code, choose an anonymous username, and link your Web3 wallet.",
-      buttonLabel: "Verify Code & Connect Wallet",
+        "First time here? Connect your wallet to generate a secure vault. Enter a government support code if you are claiming a session subsidy.",
+      buttonLabel: "Initialize Vault",
     };
   }, [mode]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMessage("");
-    setIsConnecting(true);
+  useEffect(() => {
+    let isCancelled = false;
 
-    if (mode === "therapist") {
-      window.localStorage.setItem(
-        "mindpass-therapist-profile",
-        JSON.stringify({
-          walletAddress: DEMO_THERAPIST_WALLET,
-        }),
-      );
-      router.push("/provider-lobby");
-      return;
-    }
+    const syncWalletLogin = async () => {
+      if (mode !== "login" || !isConnected || !address || !supabase) {
+        return;
+      }
 
-    if (mode === "login") {
-      const loginUsername =
-        DEMO_PATIENT_WALLET.toLowerCase() === EASTER_EGG_WALLET
-          ? EASTER_EGG_USERNAME
-          : username.trim();
+      const normalizedAddress = address.toLowerCase();
+      setIsCheckingLogin(true);
+      setErrorMessage("");
 
-      window.localStorage.setItem(
-        "mindpass-patient-profile",
-        JSON.stringify({
-          walletAddress: DEMO_PATIENT_WALLET,
-          username: loginUsername,
-        }),
-      );
-      router.push("/dashboard");
-      return;
-    }
+      const { data, error } = await supabase
+        .from("patients")
+        .select("wallet_address, total_deposits, subsidy_balance")
+        .ilike("wallet_address", address)
+        .maybeSingle();
 
-    try {
-      const walletAddress = DEMO_PATIENT_WALLET;
-      const submittedUsername =
-        walletAddress.toLowerCase() === EASTER_EGG_WALLET
-          ? EASTER_EGG_USERNAME
-          : username.trim();
+      if (isCancelled) {
+        return;
+      }
 
-      const response = await fetch("/api/verify-code", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          code: redeemCode,
-          walletAddress,
-          username: submittedUsername,
-        }),
-      });
+      if (error) {
+        setErrorMessage(error.message);
+        setIsCheckingLogin(false);
+        return;
+      }
 
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.error ?? "Unable to verify access code.");
+      if (!data) {
+        setErrorMessage("No vault found for this wallet. Please go to 'Initialize Vault' to set up.");
+        setIsCheckingLogin(false);
+        return;
       }
 
       window.localStorage.setItem(
         "mindpass-patient-profile",
-        JSON.stringify(result.data),
+        JSON.stringify({
+          walletAddress: normalizedAddress,
+          totalDeposits: Number(data.total_deposits ?? 0),
+          subsidyBalance: Number(data.subsidy_balance ?? 0),
+        }),
       );
+      window.localStorage.removeItem("mindpass-therapist-profile");
+      window.localStorage.setItem("mindpass-active-session", "patient");
+      window.dispatchEvent(new Event("mindpass-session-changed"));
+      router.replace("/dashboard");
+    };
 
-      router.push("/dashboard");
-    } catch (error) {
-      setErrorMessage(
-        error instanceof Error ? error.message : "Unable to verify access code.",
-      );
-      setIsConnecting(false);
+    syncWalletLogin();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [address, isConnected, mode, router]);
+
+  const handleInitializeVault = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setErrorMessage("");
+
+    if (!isConnected || !address) {
+      setErrorMessage("Connect your wallet before completing anonymous setup.");
       return;
     }
-  };
 
-  // 判斷按鈕是否該反灰停用
-  const isSubmitDisabled = 
-    isConnecting || 
-    (mode === "create" && (!username || !redeemCode)) || // 註冊時：必須有 username 和 redeemCode
-    (mode === "login" && !username);                     // 登入時：必須有 username
+    if (!supabase) {
+      setErrorMessage("Supabase client is unavailable.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    const normalizedAddress = address.toLowerCase();
+    const currentEthBalance = balanceData
+      ? Number(formatEther(balanceData.value))
+      : 0;
+
+    try {
+      const trimmedSupportCode = supportCode.trim();
+      let voucherValue = 0;
+
+      if (trimmedSupportCode) {
+        const { data: codeData, error: codeError } = await supabase
+          .from("redeem_codes")
+          .select("eth_value, is_used")
+          .eq("code", trimmedSupportCode)
+          .single();
+
+        if (codeError || !codeData || codeData.is_used === true) {
+          throw new Error("Invalid or already used support code.");
+        }
+
+        voucherValue = Number(codeData.eth_value || 0.005);
+      }
+
+      const { data: existingPatient, error: existingPatientError } = await supabase
+        .from("patients")
+        .select("subsidy_balance")
+        .ilike("wallet_address", address)
+        .maybeSingle();
+
+      if (existingPatientError) {
+        throw existingPatientError;
+      }
+
+      const currentSubsidy = Number(existingPatient?.subsidy_balance || 0);
+      const newSubsidyBalance = currentSubsidy + voucherValue;
+
+      const { data, error } = await supabase
+        .from("patients")
+        .upsert(
+          {
+            wallet_address: normalizedAddress,
+            support_code: trimmedSupportCode || null,
+            total_deposits: currentEthBalance,
+            subsidy_balance: newSubsidyBalance,
+          },
+          { onConflict: "wallet_address" },
+        )
+        .select("wallet_address, total_deposits, subsidy_balance")
+        .single();
+
+      if (error) {
+        setErrorMessage(error.message);
+        setIsSubmitting(false);
+        return;
+      }
+
+      if (trimmedSupportCode) {
+        const { error: burnCodeError } = await supabase
+          .from("redeem_codes")
+          .update({
+            is_used: true,
+            used_by_wallet: normalizedAddress,
+          })
+          .eq("code", trimmedSupportCode);
+
+        if (burnCodeError) {
+          throw burnCodeError;
+        }
+      }
+
+      window.localStorage.setItem(
+        "mindpass-patient-profile",
+        JSON.stringify({
+          walletAddress: normalizedAddress,
+          totalDeposits: Number(data?.total_deposits ?? currentEthBalance),
+          subsidyBalance: Number(data?.subsidy_balance ?? newSubsidyBalance),
+        }),
+      );
+      window.localStorage.removeItem("mindpass-therapist-profile");
+      window.localStorage.setItem("mindpass-active-session", "patient");
+      window.dispatchEvent(new Event("mindpass-session-changed"));
+      router.replace("/dashboard");
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to complete anonymous setup.",
+      );
+      setIsSubmitting(false);
+    }
+  };
 
   return (
     <GlassCard className="glass-panel p-6 sm:p-8">
       <div className="mb-8 flex flex-col gap-5">
-        <StatusBadge label="Web3 Auth Flow" tone="neutral" />
+        <StatusBadge label="Gov Subsidy + Wallet Auth" tone="neutral" />
         <div>
-          <h1 className="text-3xl font-semibold text-[var(--text-primary)]">{content.title}</h1>
+          <h1 className="text-3xl font-semibold text-[var(--text-primary)]">
+            {content.title}
+          </h1>
           <p className="mt-3 max-w-xl text-base leading-7 text-[var(--text-muted)]">
             {content.description}
           </p>
@@ -147,72 +221,74 @@ export default function AuthCard({ initialMode = "create" }: AuthCardProps) {
         <AuthTabs mode={mode} onChange={setMode} />
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-5">
-        {/* 病患註冊模式專屬：政府認證碼輸入框 */}
-        {mode === "create" && (
+      <form
+        onSubmit={mode === "create" ? handleInitializeVault : (event) => event.preventDefault()}
+        className={`space-y-5 ${mode === "login" ? "flex flex-col items-center text-center" : ""}`}
+      >
+        {mode === "create" ? (
           <label className="block">
             <span className="mb-2 flex items-center justify-between text-sm text-[var(--text-secondary)]">
               <span>Government Support Code</span>
-              <span className="text-xs text-[var(--accent-primary-strong)]">Required</span>
+              <span className="text-xs text-[var(--text-faint)]">Optional</span>
             </span>
             <input
               type="text"
-              required
-              value={redeemCode}
-              onChange={(e) => setRedeemCode(e.target.value)}
+              value={supportCode}
+              onChange={(event) => setSupportCode(event.target.value)}
               className="form-input w-full"
-              placeholder="e.g. GOV-2026-XYZ"
+              placeholder="e.g. NHS-2026"
             />
             <p className="mt-2 text-xs text-[var(--text-muted)]">
-              This code grants you access and 0.005 Sepolia ETH for your session escrow.
+              This code secures your session subsidy without requiring names,
+              email, or other personally identifying information.
             </p>
           </label>
-        )}
+        ) : null}
 
-        {/* 病患模式 (註冊與登入)：Username 輸入框 */}
-        {mode !== "therapist" && (
-          <label className="block">
-            <span className="mb-2 block text-sm text-[var(--text-secondary)]">
-              Anonymous Username
-            </span>
-            <input
-              type="text"
-              required
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="form-input w-full"
-              placeholder="e.g. calm_ocean_22"
-            />
-            {mode === "create" && (
-              <p className="mt-2 text-xs text-[var(--text-muted)]">
-                This name will be stored encrypted. Do not use your real name.
-              </p>
-            )}
-          </label>
-        )}
-
-        {/* 諮商師模式提示 */}
-        {mode === "therapist" && (
-          <div className="liquid-glass-soft rounded-[22px] border border-[var(--accent-primary)]/15 bg-[var(--accent-primary)]/6 px-4 py-5 text-center">
-            <p className="text-sm text-[var(--accent-primary-strong)]">
-              Please ensure your wallet containing the verified SBT is active before connecting.
+        {mode === "create" ? (
+          <div className="liquid-glass-soft rounded-[22px] border border-[var(--accent-primary)]/15 bg-[var(--accent-primary)]/6 px-4 py-5">
+            <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+              <div>
+                <p className="text-sm font-medium text-[var(--text-primary)]">
+                  Wallet as identity
+                </p>
+                <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
+                  Connect your Web3 wallet. This is your only account identity and
+                  your decryption key for protected session records.
+                </p>
+              </div>
+              <WalletConnectButton />
+            </div>
+          </div>
+        ) : (
+          <div className="flex w-full flex-col items-center justify-center gap-4 rounded-[24px] border border-[var(--glass-border-soft)] bg-white/[0.02] px-6 py-8 text-center">
+            <p className="max-w-md text-sm leading-6 text-[var(--text-muted)]">
+              Connect the wallet you used before and MindPass will verify your key automatically.
             </p>
+            <WalletConnectButton />
           </div>
         )}
 
-        {/* Web3 免責聲明 */}
-        {mode === "create" && (
-          <label className="liquid-glass-soft flex items-start gap-3 rounded-[22px] px-4 py-4 mt-4 cursor-pointer">
-            <input 
-              type="checkbox" 
-              required 
-              className="mt-1 h-4 w-4 accent-[var(--accent-primary)]" 
-            />
-            <span className="text-sm leading-6 text-[var(--text-muted)]">
-              I understand that my wallet acts as my cryptographic key. If I lose access to my wallet, I lose access to my chat history.
-            </span>
-          </label>
-        )}
+        {mode === "create" && isConnected && address ? (
+          <button
+            type="submit"
+            disabled={isSubmitting}
+            className={`button-primary rounded-full px-6 py-3 text-center text-sm font-medium transition-all ${
+              isSubmitting ? "cursor-wait opacity-70" : ""
+            }`}
+          >
+            {isSubmitting ? "Completing Setup..." : content.buttonLabel}
+          </button>
+        ) : null}
+
+        {mode === "login" && isCheckingLogin ? (
+          <div className="liquid-glass-soft flex items-center gap-3 rounded-[22px] px-4 py-4">
+            <span className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--text-primary)] border-t-transparent" />
+            <p className="text-sm text-[var(--text-primary)]">
+              Authenticating your wallet...
+            </p>
+          </div>
+        ) : null}
 
         {errorMessage ? (
           <div className="liquid-glass-soft rounded-[22px] border border-red-400/20 bg-red-500/8 px-4 py-4">
@@ -220,38 +296,11 @@ export default function AuthCard({ initialMode = "create" }: AuthCardProps) {
           </div>
         ) : null}
 
-        <div className="mt-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex flex-col gap-2">
-            <button
-              type="submit"
-              disabled={isSubmitDisabled}
-              className={`button-primary rounded-full px-6 py-3 text-center text-sm font-medium transition-all ${
-                isConnecting ? "opacity-70 cursor-wait" : ""
-              }`}
-            >
-              {isConnecting
-                ? mode === "therapist"
-                  ? "Verifying SBT..."
-                  : "Verifying Access..."
-                : content.buttonLabel}
-            </button>
-
-            {mode === "therapist" ? (
-              <Link
-                href="/therapist-onboarding"
-                className="pl-1 text-xs text-[var(--text-muted)] transition hover:text-[var(--text-primary)]"
-              >
-                Apply to become a verified therapist
-              </Link>
-            ) : null}
-          </div>
-          
-          {mode !== "therapist" ? (
-            <p className="text-sm text-[var(--text-muted)]">
-              Demo wallet: {DEMO_PATIENT_WALLET.slice(0, 8)}...
-            </p>
-          ) : null}
-        </div>
+        <p className={`text-sm text-[var(--text-muted)] ${mode === "login" ? "max-w-md" : ""}`}>
+          {mode === "create"
+            ? "Your wallet and subsidy code are sufficient to initialize a zero-PII vault."
+            : "If this wallet has already been registered, access will be granted automatically."}
+        </p>
       </form>
     </GlassCard>
   );

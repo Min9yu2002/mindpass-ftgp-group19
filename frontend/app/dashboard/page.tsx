@@ -1,17 +1,24 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { formatEther } from "viem";
+import { useAccount, useBalance, useDisconnect } from "wagmi";
 import EscrowModal from "../../components/EscrowModal";
 import GlassCard from "../../components/GlassCard";
 import QuickActionCard from "../../components/QuickActionCard";
 import SectionHeading from "../../components/SectionHeading";
 import StatusBadge from "../../components/StatusBadge";
 import SummaryCard from "../../components/SummaryCard";
-import { mockActivity } from "../../lib/mock-activity";
-import { mockTherapists, type Therapist } from "../../lib/mock-therapists";
+import { readSessionContext } from "../../lib/session";
+import {
+  getTherapistDisplayName,
+  getTherapistDisplaySpecialty,
+} from "../../lib/therapist-display";
+import { supabase } from "@/lib/supabase";
+import type { Therapist } from "../../lib/mock-therapists";
 
-type SummaryTone = "neutral" | "success" | "warning";
+type SummaryTone = "neutral" | "success" | "warning" | "brand";
 
 type DashboardSummaryCard = {
   label: string;
@@ -21,103 +28,498 @@ type DashboardSummaryCard = {
   tone: SummaryTone;
 };
 
+type PatientProfile = {
+  walletAddress: string;
+  totalDeposits: number;
+  subsidyBalance: number;
+};
+
+type ActivityItem = {
+  id: string;
+  title: string;
+  description: string;
+  status: string;
+  timeLabel: string;
+};
+
+function deriveModeLabel(supportedModes: ("Voice" | "Text")[]) {
+  if (supportedModes.includes("Voice") && supportedModes.includes("Text")) {
+    return "Hybrid" as const;
+  }
+
+  if (supportedModes.includes("Voice")) {
+    return "Voice" as const;
+  }
+
+  if (supportedModes.includes("Text")) {
+    return "Text" as const;
+  }
+
+  return "Not Available" as const;
+}
+
+function formatEth(value: number) {
+  return `${value.toFixed(3)} ETH`;
+}
+
+function formatRelativeTime(value?: string | null) {
+  if (!value) {
+    return "Recently";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  const diffMs = date.getTime() - Date.now();
+  const diffMinutes = Math.round(diffMs / 60000);
+  const diffHours = Math.round(diffMs / 3600000);
+  const diffDays = Math.round(diffMs / 86400000);
+  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+  if (Math.abs(diffMinutes) < 60) {
+    return rtf.format(diffMinutes, "minute");
+  }
+
+  if (Math.abs(diffHours) < 24) {
+    return rtf.format(diffHours, "hour");
+  }
+
+  return rtf.format(diffDays, "day");
+}
+
+function mapActivityStatus(value: unknown) {
+  const status = String(value ?? "Logged").trim();
+  return status || "Logged";
+}
+
+function mapActivityTitle(row: Record<string, unknown>) {
+  return (
+    String(
+      row.title ??
+        row.action_title ??
+        row.activity_type ??
+        row.type ??
+        "Wallet activity",
+    ) || "Wallet activity"
+  );
+}
+
+function mapActivityDescription(row: Record<string, unknown>) {
+  return String(
+    row.description ??
+      row.detail ??
+      row.notes ??
+      row.metadata_summary ??
+      "Session-related activity synced from Supabase.",
+  );
+}
+
+function formatShortAddress(address?: string | null) {
+  return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : "";
+}
+
+function normalizeLanguages(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item)).filter(Boolean);
+  }
+
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function normalizeSupportedModes(value: unknown): ("Voice" | "Text")[] {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(",")
+      : [];
+
+  return values
+    .map((item) => String(item).trim().toLowerCase())
+    .filter(Boolean)
+    .map((item) => (item === "voice" || item === "video" ? "Voice" : "Text"))
+    .filter((item, index, array) => array.indexOf(item) === index) as (
+    | "Voice"
+    | "Text"
+  )[];
+}
+
 export default function DashboardPage() {
+  const router = useRouter();
+  const { address, isConnected } = useAccount();
+  const { disconnect } = useDisconnect();
+  const { data: balanceData } = useBalance({
+    address,
+    query: {
+      enabled: Boolean(address && isConnected),
+    },
+  });
   const [therapists, setTherapists] = useState<Therapist[]>([]);
-  const [isLoadingTherapists, setIsLoadingTherapists] = useState(true);
-  const [therapistsError, setTherapistsError] = useState("");
+  const [activities, setActivities] = useState<ActivityItem[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [dashboardError, setDashboardError] = useState("");
   const [selectedTherapist, setSelectedTherapist] = useState<Therapist | null>(
     null,
   );
-  const [patientProfile, setPatientProfile] = useState<{
-    username: string;
-    walletAddress: string;
-  } | null>(null);
+  const [patientProfile, setPatientProfile] = useState<PatientProfile | null>(
+    null,
+  );
+  const [activeEscrowCount, setActiveEscrowCount] = useState(0);
+  const [availableTherapistCount, setAvailableTherapistCount] = useState(0);
+  const [lastActiveTherapistAddress, setLastActiveTherapistAddress] = useState("");
+  const [sessionHydrated, setSessionHydrated] = useState(false);
+  const [isProviderBlocked, setIsProviderBlocked] = useState(false);
 
   useEffect(() => {
-    const storedProfile = window.localStorage.getItem("mindpass-patient-profile");
-    if (storedProfile) {
-      try {
-        setPatientProfile(JSON.parse(storedProfile));
-      } catch {
-        window.localStorage.removeItem("mindpass-patient-profile");
-      }
+    if (typeof window === "undefined") {
+      return;
     }
-  }, []);
+
+    const storedTherapistProfile = window.localStorage.getItem("mindpass-therapist-profile");
+    const activeSession = window.localStorage.getItem("mindpass-active-session");
+
+    if (activeSession === "therapist" && storedTherapistProfile) {
+      setIsProviderBlocked(true);
+      setSessionHydrated(true);
+      return;
+    }
+
+    setIsProviderBlocked(false);
+    const sessionContext = readSessionContext(isConnected ? address : null);
+    if (sessionContext.userRole !== "patient") {
+      router.replace("/auth");
+      return;
+    }
+
+    setSessionHydrated(true);
+  }, [address, isConnected, router]);
 
   useEffect(() => {
     let isCancelled = false;
 
-    const fetchTherapists = async () => {
-      setIsLoadingTherapists(true);
-      setTherapistsError("");
+    const hydrateDashboard = async () => {
+      if (!sessionHydrated || isProviderBlocked) {
+        return;
+      }
+
+      const storedProfile = window.localStorage.getItem("mindpass-patient-profile");
+      if (!storedProfile) {
+        if (!isCancelled) {
+          setDashboardError("No patient profile found. Please verify access again.");
+          setIsLoading(false);
+        }
+        return;
+      }
+
+      let parsedProfile: {
+        walletAddress?: string;
+        totalDeposits?: number;
+        subsidyBalance?: number;
+      };
+      try {
+        parsedProfile = JSON.parse(storedProfile);
+      } catch {
+        window.localStorage.removeItem("mindpass-patient-profile");
+        if (!isCancelled) {
+          setDashboardError("Stored patient profile is invalid. Please sign in again.");
+          setIsLoading(false);
+        }
+        return;
+      }
+
+      const walletAddress = String(parsedProfile.walletAddress ?? "").trim();
+      if (!walletAddress) {
+        if (!isCancelled) {
+          setDashboardError("Wallet address is missing from the patient profile.");
+          setIsLoading(false);
+        }
+        return;
+      }
+
+      setPatientProfile({
+        walletAddress,
+        totalDeposits: Number(parsedProfile.totalDeposits ?? 0),
+        subsidyBalance: Number(parsedProfile.subsidyBalance ?? 0),
+      });
+
+      if (!supabase) {
+        if (!isCancelled) {
+          setDashboardError("Supabase client is unavailable.");
+          setIsLoading(false);
+        }
+        return;
+      }
 
       try {
-        const response = await fetch("/api/therapists");
-        const result = await response.json();
+        const patientQuery = supabase
+          .from("patients")
+          .select("wallet_address, total_deposits, subsidy_balance")
+          .ilike("wallet_address", walletAddress)
+          .maybeSingle();
 
-        if (!response.ok) {
-          throw new Error(result.error ?? "Unable to load therapists.");
+        const activeSessionsQuery = supabase
+          .from("sessions")
+          .select("id", { count: "exact", head: true })
+          .eq("patient_wallet", walletAddress)
+          .in("status", ["active", "initiated"]);
+
+        const latestActiveSessionQuery = supabase
+          .from("sessions")
+          .select("therapist_wallet")
+          .eq("patient_wallet", walletAddress)
+          .eq("status", "active")
+          .order("updated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        const activitiesQuery = supabase
+          .from("activities")
+          .select("*")
+          .ilike("wallet_address", walletAddress)
+          .order("created_at", { ascending: false })
+          .limit(5);
+
+        const therapistsQuery = supabase
+          .from("therapists")
+          .select(
+            "id, wallet_address, full_name, legal_name, specialty, clinical_specialty, bio, languages, is_online, supported_modes, ekyc_status, sbt_minted",
+          )
+          .eq("ekyc_status", "verified")
+          .eq("sbt_minted", true)
+          .eq("is_online", true)
+          .order("full_name", { ascending: true });
+
+        const [
+          patientResult,
+          activeSessionsResult,
+          latestActiveSessionResult,
+          activitiesResult,
+          therapistsResult,
+        ] = await Promise.all([
+          patientQuery,
+          activeSessionsQuery,
+          latestActiveSessionQuery,
+          activitiesQuery,
+          therapistsQuery,
+        ]);
+
+        if (isCancelled) {
+          return;
         }
 
-        if (!isCancelled) {
-          setTherapists(result.data ?? []);
+        if (patientResult.error) {
+          throw patientResult.error;
         }
+
+        if (activeSessionsResult.error) {
+          throw activeSessionsResult.error;
+        }
+
+        if (latestActiveSessionResult.error) {
+          throw latestActiveSessionResult.error;
+        }
+
+        const patientRow = patientResult.data;
+        if (!patientRow) {
+          console.warn(
+            "Ghost profile detected. DB record missing. Clearing local storage.",
+          );
+          window.localStorage.removeItem("mindpass-patient-profile");
+          window.localStorage.removeItem("mindpass-xmtp-connected");
+          if (window.localStorage.getItem("mindpass-active-session") === "patient") {
+            window.localStorage.removeItem("mindpass-active-session");
+          }
+          window.dispatchEvent(new Event("mindpass-session-changed"));
+          router.replace("/auth");
+          return;
+        }
+
+        setPatientProfile({
+          walletAddress,
+          totalDeposits: Number(patientRow?.total_deposits ?? 0),
+          subsidyBalance: Number(patientRow?.subsidy_balance ?? 0),
+        });
+        window.localStorage.setItem(
+          "mindpass-patient-profile",
+          JSON.stringify({
+            walletAddress,
+            totalDeposits: Number(patientRow?.total_deposits ?? 0),
+            subsidyBalance: Number(patientRow?.subsidy_balance ?? 0),
+          }),
+        );
+
+        let normalizedTherapists: Therapist[] = [];
+        if (therapistsResult.error) {
+          console.error("Therapist query failed on dashboard:", therapistsResult.error);
+          setDashboardError("Unable to fetch therapists.");
+        } else {
+          normalizedTherapists = (therapistsResult.data ?? []).map((therapist) => {
+            const supportedModes = normalizeSupportedModes(therapist.supported_modes);
+            const displayName = getTherapistDisplayName(therapist);
+            const displaySpecialty = getTherapistDisplaySpecialty(therapist);
+
+            return {
+              id: String(therapist.id ?? therapist.wallet_address ?? crypto.randomUUID()),
+              name: displayName,
+              specialty: displaySpecialty,
+              languages: normalizeLanguages(therapist.languages),
+              bio:
+                String(
+                  therapist.bio ??
+                    "A verified therapist profile is being prepared for this care directory.",
+                ) ||
+                "A verified therapist profile is being prepared for this care directory.",
+              isOnline: Boolean(therapist.is_online),
+              availability: "Available now",
+              rating: 0,
+              mode: deriveModeLabel(supportedModes),
+              walletAddress: String(therapist.wallet_address ?? ""),
+              supportedModes,
+            };
+          });
+          setDashboardError("");
+        }
+
+        setTherapists(normalizedTherapists);
+        setActiveEscrowCount(activeSessionsResult.count ?? 0);
+        setLastActiveTherapistAddress(
+          String(latestActiveSessionResult.data?.therapist_wallet ?? ""),
+        );
+        setAvailableTherapistCount(normalizedTherapists.length);
+        setActivities(
+          (activitiesResult.error ? [] : activitiesResult.data ?? []).map((row) => ({
+            id: String(row.id ?? crypto.randomUUID()),
+            title: mapActivityTitle(row as Record<string, unknown>),
+            description: mapActivityDescription(row as Record<string, unknown>),
+            status: mapActivityStatus((row as Record<string, unknown>).status),
+            timeLabel: formatRelativeTime(
+              String(
+                row.created_at ??
+                  row.updated_at ??
+                  row.timestamp ??
+                  "",
+              ),
+            ),
+          })),
+        );
       } catch (error) {
         if (!isCancelled) {
-          setTherapistsError(
+          setDashboardError(
             error instanceof Error
               ? error.message
-              : "Unable to load therapists.",
+              : "Unable to load dashboard data.",
           );
-          setTherapists(mockTherapists);
         }
       } finally {
         if (!isCancelled) {
-          setIsLoadingTherapists(false);
+          setIsLoading(false);
         }
       }
     };
 
-    fetchTherapists();
+    hydrateDashboard();
 
     return () => {
       isCancelled = true;
     };
-  }, []);
+  }, [isProviderBlocked, router, sessionHydrated]);
 
-  const therapistCount = therapists.length || mockTherapists.length;
+  const handleSignOut = () => {
+    window.localStorage.removeItem("mindpass-patient-profile");
+    window.localStorage.removeItem("mindpass-therapist-profile");
+    window.localStorage.removeItem("mindpass-xmtp-connected");
+    window.localStorage.removeItem("mindpass-active-session");
+    window.dispatchEvent(new Event("mindpass-session-changed"));
+    disconnect();
+    router.replace("/");
+  };
 
-  // 將卡片數據替換成病患視角的 Web3 狀態
-  const summaryCards: DashboardSummaryCard[] = useMemo(() => [
-    {
-      label: "Subsidy Balance",
-      value: "0.005 Sepolia ETH",
-      detail: "Native ETH allocated securely from your Gov code flow.",
-      badge: "Funded",
-      tone: "success",
-    },
-    {
-      label: "Active Escrows",
-      value: "1 Session",
-      detail: "Funds locked safely in smart contract for upcoming sessions.",
-      badge: "Locked",
-      tone: "warning", // 用 warning 顏色(通常是黃色/橘色)表示資金被鎖定中
-    },
-    {
-      label: "Available Therapists",
-      value: String(therapistCount),
-      detail: "Professionals currently verified via on-chain SBT.",
-      badge: "Verified",
-      tone: "success",
-    },
-    {
-      label: "Privacy Level",
-      value: "Zero-Knowledge",
-      detail: "P2P nodes active. No chat data is stored on our servers.",
-      badge: "Secured",
-      tone: "neutral",
-    },
-  ], [therapistCount]);
+  const summaryCards: DashboardSummaryCard[] = useMemo(
+    () => [
+      {
+        label: "Subsidy Balance",
+        value: patientProfile ? formatEth(patientProfile.subsidyBalance) : "0.000 ETH",
+        detail: "Government funded session voucher for your care.",
+        badge: "Voucher",
+        tone: "brand",
+      },
+      {
+        label: "Wallet Balance",
+        value: balanceData
+          ? formatEth(Number(formatEther(balanceData.value)))
+          : patientProfile
+            ? formatEth(patientProfile.totalDeposits)
+            : "0.000 ETH",
+        detail: "Live on-chain balance from your connected wallet.",
+        badge: "Live",
+        tone: "success",
+      },
+      {
+        label: "Available Therapists",
+        value: String(availableTherapistCount),
+        detail: "Therapists online and ready to accept secure requests.",
+        badge: "Online",
+        tone: "success",
+      },
+      {
+        label: "Active Escrows",
+        value: String(activeEscrowCount),
+        detail: "Sessions currently initiated or active for your wallet.",
+        badge: activeEscrowCount > 0 ? "Locked" : "Idle",
+        tone: activeEscrowCount > 0 ? "warning" : "neutral",
+      },
+    ],
+    [
+      activeEscrowCount,
+      availableTherapistCount,
+      balanceData,
+      patientProfile,
+    ],
+  );
+
+  const quickChatHref = selectedTherapist?.walletAddress
+    ? `/chat?role=patient&address=${encodeURIComponent(selectedTherapist.walletAddress)}`
+    : lastActiveTherapistAddress
+      ? `/chat?role=patient&address=${encodeURIComponent(lastActiveTherapistAddress)}`
+      : "/chat?role=patient";
+  const shortAddress = formatShortAddress(patientProfile?.walletAddress);
+
+  if (!sessionHydrated) {
+    return null;
+  }
+
+  if (isProviderBlocked) {
+    return (
+      <main className="app-shell page-canvas page-canvas-soft relative overflow-hidden bg-background pt-32 text-foreground md:pt-36">
+        <div className="relative mx-auto w-full max-w-7xl px-6 py-10 lg:px-10">
+          <GlassCard className="glass-panel p-6 sm:p-8">
+            <div className="space-y-4">
+              <div className="glass-chip-muted w-fit px-4 py-2 text-xs uppercase tracking-[0.24em] text-[var(--text-faint)]">
+                Role Isolation
+              </div>
+              <div>
+                <h1 className="text-3xl font-semibold text-[var(--text-primary)]">
+                  Access Denied: You are currently logged in as a Provider.
+                </h1>
+                <p className="mt-3 max-w-2xl text-base leading-7 text-[var(--text-muted)]">
+                  You cannot access the Patient Vault. Please use the navigation
+                  bar to return to the Provider Lobby, or Sign Out.
+                </p>
+              </div>
+            </div>
+          </GlassCard>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell-subtle page-canvas page-canvas-violet relative overflow-hidden bg-background pt-32 text-foreground md:pt-36">
@@ -127,33 +529,40 @@ export default function DashboardPage() {
             <span className="text-sm uppercase tracking-[0.26em] text-[var(--accent-primary-strong)]">
               Patient Vault
             </span>
-            <h1 className="mt-4 text-4xl font-semibold tracking-tight text-white">
-              Anonymous Dashboard
+            <h1 className="mt-4 text-4xl font-semibold tracking-tight text-[var(--text-primary)]">
+              {shortAddress ? `${shortAddress}'s Vault` : "Anonymous Vault"}
             </h1>
             <p className="mt-3 max-w-2xl text-base leading-7 text-[var(--text-muted)]">
               Manage your Sepolia ETH balance, browse verified therapists, and enter your secure P2P sessions without exposing your identity.
             </p>
-            {patientProfile ? (
+            {shortAddress ? (
               <p className="mt-3 text-sm text-[var(--text-faint)]">
-                Signed in as {patientProfile.username}
+                Connected Wallet: {shortAddress}
               </p>
             ) : null}
           </div>
 
           <div className="flex flex-wrap gap-3">
-            <Link
-              href="/"
+            <button
+              type="button"
+              onClick={handleSignOut}
               className="button-secondary rounded-full px-5 py-3 text-sm font-medium"
             >
               Sign Out
-            </Link>
-            <button
-              className="button-primary rounded-full px-5 py-3 text-sm font-medium"
-            >
-              0x71C...9E3A (Connected)
+            </button>
+            <button className="button-primary rounded-full px-5 py-3 text-sm font-medium">
+              {shortAddress || "Wallet Unavailable"}
             </button>
           </div>
         </header>
+
+        {dashboardError ? (
+          <div className="liquid-glass-soft mb-6 rounded-[24px] border border-red-400/20 bg-red-500/8 px-4 py-4">
+            <p className="text-sm text-red-600 dark:text-red-300">
+              {dashboardError}
+            </p>
+          </div>
+        ) : null}
 
         <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {summaryCards.map((card) => (
@@ -170,8 +579,6 @@ export default function DashboardPage() {
 
         <section className="mt-8 grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
           <div className="space-y-4">
-            
-            {/* 諮商師列表 */}
             <GlassCard className="glass-panel p-6">
               <div className="mb-6 flex items-center justify-between gap-4">
                 <SectionHeading
@@ -182,7 +589,7 @@ export default function DashboardPage() {
               </div>
 
               <div className="space-y-3">
-                {isLoadingTherapists ? (
+                {isLoading ? (
                   <div className="liquid-glass-soft rounded-[24px] px-4 py-6">
                     <p className="text-sm text-[var(--text-muted)]">
                       Loading verified therapists...
@@ -190,30 +597,34 @@ export default function DashboardPage() {
                   </div>
                 ) : null}
 
-                {therapistsError ? (
-                  <div className="liquid-glass-soft rounded-[24px] border border-red-400/20 bg-red-500/8 px-4 py-4">
-                    <p className="text-sm text-red-600 dark:text-red-300">
-                      {therapistsError}
+                {therapists.length === 0 && !isLoading ? (
+                  <div className="liquid-glass-soft rounded-[24px] px-4 py-6">
+                    <p className="text-sm text-[var(--text-muted)]">
+                      No therapists are currently available.
                     </p>
                   </div>
                 ) : null}
 
-                {(therapists.length ? therapists : mockTherapists).map((therapist) => (
+                {therapists.map((therapist) => (
                   <div
                     key={therapist.id}
-                    className="liquid-glass-soft rounded-[24px] px-4 py-4 border border-white/5"
+                    className="liquid-glass-soft rounded-[24px] border border-white/5 px-4 py-4"
                   >
                     <div className="flex items-start justify-between gap-4">
                       <div>
-                        <p className="font-medium text-white">
+                        <p className="font-medium text-[var(--text-primary)]">
                           {therapist.name}
                         </p>
                         <p className="mt-1 text-sm text-[var(--text-muted)]">
                           {therapist.specialty}
                         </p>
                       </div>
-                      <div className="glass-highlight rounded-full px-3 py-1 text-xs text-[var(--accent-primary-strong)]">
-                        {therapist.mode}
+                      <div className="flex flex-wrap justify-end gap-2">
+                        {therapist.mode !== "Not Available" ? (
+                          <div className="glass-highlight rounded-full px-3 py-1 text-xs text-[var(--accent-primary-strong)]">
+                            {therapist.mode}
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                     <div className="mt-4 flex flex-wrap gap-2">
@@ -227,7 +638,9 @@ export default function DashboardPage() {
                       ))}
                     </div>
                     <div className="mt-5 flex items-center justify-between border-t border-white/5 pt-4">
-                      <span className="text-sm text-[var(--text-muted)]">{therapist.availability}</span>
+                      <span className="text-sm text-[var(--text-muted)]">
+                        {therapist.availability}
+                      </span>
                       <button
                         type="button"
                         onClick={() => setSelectedTherapist(therapist)}
@@ -241,7 +654,6 @@ export default function DashboardPage() {
               </div>
             </GlassCard>
 
-            {/* 歷史活動紀錄 */}
             <GlassCard className="glass-panel p-6">
               <div className="mb-6 flex items-center justify-between gap-4">
                 <SectionHeading
@@ -252,16 +664,26 @@ export default function DashboardPage() {
               </div>
 
               <div className="space-y-3">
-                {mockActivity.map((item) => (
+                {activities.length === 0 && !isLoading ? (
+                  <div className="liquid-glass-soft rounded-[24px] border border-white/5 px-4 py-4">
+                    <p className="text-sm text-[var(--text-muted)]">
+                      No recent activity has been recorded for this wallet.
+                    </p>
+                  </div>
+                ) : null}
+
+                {activities.map((item) => (
                   <div
                     key={item.id}
-                    className="liquid-glass-soft rounded-[24px] px-4 py-4 border border-white/5"
+                    className="liquid-glass-soft rounded-[24px] border border-white/5 px-4 py-4"
                   >
                     <div className="flex items-start justify-between gap-4">
                       <div>
-                        <p className="font-medium text-white">{item.title}</p>
+                        <p className="font-medium text-[var(--text-primary)]">
+                          {item.title}
+                        </p>
                         <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
-                          {item.detail}
+                          {item.description}
                         </p>
                       </div>
                       <StatusBadge
@@ -270,7 +692,7 @@ export default function DashboardPage() {
                       />
                     </div>
                     <p className="mt-3 text-xs uppercase tracking-[0.18em] text-[var(--text-faint)]">
-                      {item.time}
+                      {item.timeLabel}
                     </p>
                   </div>
                 ))}
@@ -279,13 +701,11 @@ export default function DashboardPage() {
           </div>
 
           <div className="space-y-4">
-            
-            {/* 快速操作區 */}
             <GlassCard className="glass-panel p-6">
               <SectionHeading eyebrow="Quick Actions" title="Manage Session" />
               <div className="mt-5 space-y-4">
                 <QuickActionCard
-                  href="/chat?role=patient"
+                  href={quickChatHref}
                   title="Enter P2P Chat Room"
                   description="Join your scheduled session. End-to-end encryption will be established."
                   tag="Active"
@@ -302,40 +722,6 @@ export default function DashboardPage() {
                   description="Export your chat history locally using your wallet signature."
                   tag="Data"
                 />
-              </div>
-            </GlassCard>
-
-            {/* 把原本的 Supabase 換成 Web3 節點與合約狀態 */}
-            <GlassCard className="glass-panel glass-highlight p-6">
-              <div className="mb-5 flex items-center justify-between">
-                <SectionHeading eyebrow="Infrastructure" title="Node Connection" />
-                <StatusBadge label="Secured" tone="success" />
-              </div>
-
-              <div className="space-y-3">
-                <div className="liquid-glass-soft rounded-[22px] px-4 py-3 border border-white/5">
-                  <p className="text-xs uppercase tracking-[0.18em] text-[var(--text-faint)]">
-                    Blockchain Network
-                  </p>
-                  <p className="mt-2 text-lg text-white flex items-center gap-2">
-                    <span className="h-2 w-2 rounded-full bg-emerald-400"></span>
-                    Base Sepolia Testnet
-                  </p>
-                </div>
-                <div className="liquid-glass-soft rounded-[22px] px-4 py-3 border border-white/5">
-                  <p className="text-xs uppercase tracking-[0.18em] text-[var(--text-faint)]">
-                    Escrow Smart Contract
-                  </p>
-                  <p className="mt-2 text-lg text-white font-mono text-sm text-[var(--accent-primary-strong)]">
-                    0x8a9C...3b1F
-                  </p>
-                </div>
-                <div className="liquid-glass-soft rounded-[22px] px-4 py-3 border border-white/5">
-                  <p className="text-xs uppercase tracking-[0.18em] text-[var(--text-faint)]">
-                    XMTP Comm Protocol
-                  </p>
-                  <p className="mt-2 text-lg text-white">Connected</p>
-                </div>
               </div>
             </GlassCard>
           </div>
@@ -361,8 +747,16 @@ export default function DashboardPage() {
               });
             }
 
-            window.alert("Escrow Locked! Routing to Chat...");
+            const therapistAddress = selectedTherapist.walletAddress;
             setSelectedTherapist(null);
+            if (therapistAddress) {
+              router.push(
+                `/chat?role=patient&address=${encodeURIComponent(therapistAddress)}`,
+              );
+              return;
+            }
+
+            window.alert("Escrow Locked! Routing to Chat...");
           }}
         />
       ) : null}

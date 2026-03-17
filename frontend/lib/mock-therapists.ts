@@ -7,8 +7,9 @@ export type Therapist = {
   isOnline: boolean;
   availability: string;
   rating: number;
-  mode: "Video" | "Chat" | "Hybrid";
+  mode: "Voice" | "Text" | "Hybrid" | "Not Available";
   walletAddress?: string;
+  supportedModes?: ("Voice" | "Text")[];
 };
 
 export const mockTherapists: Therapist[] = [
@@ -23,6 +24,7 @@ export const mockTherapists: Therapist[] = [
     rating: 4.9,
     mode: "Hybrid",
     walletAddress: "0x8Ec7F2F349111B2443A6C68691344B7d53d5B2cD",
+    supportedModes: ["Voice", "Text"],
   },
   {
     id: "th-002",
@@ -33,8 +35,9 @@ export const mockTherapists: Therapist[] = [
     isOnline: false,
     availability: "Open tomorrow morning",
     rating: 4.8,
-    mode: "Video",
+    mode: "Voice",
     walletAddress: "0x4f7d28c3A25B3bbCea4A2B30dD4811aE6cD27191",
+    supportedModes: ["Voice"],
   },
   {
     id: "th-003",
@@ -45,7 +48,8 @@ export const mockTherapists: Therapist[] = [
     isOnline: true,
     availability: "Weekend slots available",
     rating: 4.95,
-    mode: "Chat",
+    mode: "Text",
     walletAddress: "0x5e5D2A6fa4E988a4D4280A4cbC147F5c98b97D7A",
+    supportedModes: ["Text"],
   },
 ];

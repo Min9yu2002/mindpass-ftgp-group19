@@ -1,94 +1,399 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import GlassCard from "../../components/GlassCard";
+import LiquidToggle from "../../components/LiquidToggle";
 import SectionHeading from "../../components/SectionHeading";
 import StatusBadge from "../../components/StatusBadge";
+import { supabase } from "../../lib/supabase";
+
+type SupportedMode = "Voice" | "Text";
+
+type TherapistProfile = {
+  walletAddress: string;
+  totalEarnedEth: number;
+  supportedModes: SupportedMode[];
+};
 
 type IncomingRequest = {
   id: string;
+  patientWallet: string;
   patientAlias: string;
-  escrowStatus: string;
+  amountEth: number;
   intakeSummary: string;
 };
 
-const mockCompletedSessions = [
-  {
-    id: "sess-001",
-    patientAlias: "aurora_field_12",
-    amount: "0.45 ETH",
-    txHash: "0x1a2b...7c91",
-  },
-  {
-    id: "sess-002",
-    patientAlias: "still_river_88",
-    amount: "0.35 ETH",
-    txHash: "0x8f13...d24a",
-  },
-  {
-    id: "sess-003",
-    patientAlias: "ember_pine_04",
-    amount: "0.45 ETH",
-    txHash: "0x4b92...91de",
-  },
-];
+type CompletedSession = {
+  id: string;
+  patientAlias: string;
+  amountEth: number;
+  txHash: string;
+  endedAt: string;
+};
+
+const LEAD_THERAPIST_WALLET =
+  "0x8Ec7F2F349111B2443A6C68691344B7d53d5B2cD".toLowerCase();
+
+function normalizeSupportedModes(value: unknown): SupportedMode[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => String(item).trim().toLowerCase())
+    .filter(Boolean)
+    .map((item) => (item === "video" || item === "voice" ? "Voice" : "Text"))
+    .filter((item, index, array) => array.indexOf(item) === index) as SupportedMode[];
+}
+
+function resolveTherapistWallet(): string {
+  if (typeof window === "undefined") {
+    return LEAD_THERAPIST_WALLET;
+  }
+
+  const storedProfile = window.localStorage.getItem("mindpass-therapist-profile");
+  const storedWalletAddress = storedProfile
+    ? (() => {
+        try {
+          return JSON.parse(storedProfile).walletAddress as string | undefined;
+        } catch {
+          return undefined;
+        }
+      })()
+    : undefined;
+
+  return (storedWalletAddress ?? LEAD_THERAPIST_WALLET).toLowerCase();
+}
+
+function formatEth(value: number) {
+  return `${value.toFixed(3)} ETH`;
+}
+
+function truncateWallet(value: string) {
+  if (!value) {
+    return "Unknown wallet";
+  }
+
+  return `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
+
+function formatSessionDate(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Recently completed";
+  }
+
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 export default function TherapistPortalPage() {
   const router = useRouter();
+  const therapistWallet = useMemo(() => resolveTherapistWallet(), []);
+  const [profile, setProfile] = useState<TherapistProfile>({
+    walletAddress: therapistWallet,
+    totalEarnedEth: 0,
+    supportedModes: [],
+  });
   const [isOnline, setIsOnline] = useState(true);
   const [incomingRequest, setIncomingRequest] = useState<IncomingRequest | null>(
     null,
   );
+  const [completedSessions, setCompletedSessions] = useState<CompletedSession[]>([]);
+  const [pendingEscrowEth, setPendingEscrowEth] = useState(0);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [isLoadingModes, setIsLoadingModes] = useState(true);
+  const [isSavingModes, setIsSavingModes] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
+  const [settingsMessage, setSettingsMessage] = useState("");
+  const [dataError, setDataError] = useState("");
 
   useEffect(() => {
-    if (!isOnline) {
-      return;
-    }
+    let isCancelled = false;
 
-    if (incomingRequest) {
+    const hydratePortal = async () => {
+      if (!supabase) {
+        if (!isCancelled) {
+          setSettingsError("Supabase client is unavailable.");
+          setDataError("Supabase client is unavailable.");
+          setIsInitialLoading(false);
+          setIsLoadingModes(false);
+        }
+        return;
+      }
+
+      setDataError("");
+
+      const therapistQuery = supabase
+        .from("therapists")
+        .select("wallet_address, supported_modes, total_earned_eth, is_online")
+        .eq("wallet_address", therapistWallet)
+        .maybeSingle();
+
+      const requestedQuery = supabase
+        .from("sessions")
+        .select("id, patient_wallet, amount_eth, status, intake_summary, created_at")
+        .eq("therapist_wallet", therapistWallet)
+        .eq("status", "requested")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const pendingQuery = supabase
+        .from("sessions")
+        .select("amount_eth")
+        .eq("therapist_wallet", therapistWallet)
+        .eq("status", "active");
+
+      const completedQuery = supabase
+        .from("sessions")
+        .select("id, patient_wallet, amount_eth, tx_hash, updated_at, ended_at, completed_at, created_at")
+        .eq("therapist_wallet", therapistWallet)
+        .eq("status", "completed")
+        .order("updated_at", { ascending: false })
+        .limit(3);
+
+      const [therapistResult, requestedResult, pendingResult, completedResult] =
+        await Promise.all([
+          therapistQuery,
+          requestedQuery,
+          pendingQuery,
+          completedQuery,
+        ]);
+
+      if (isCancelled) {
+        return;
+      }
+
+      if (therapistResult.error) {
+        setSettingsError(therapistResult.error.message);
+        setDataError(therapistResult.error.message);
+      } else if (therapistResult.data) {
+        setProfile({
+          walletAddress:
+            therapistResult.data.wallet_address ?? therapistWallet,
+          totalEarnedEth: Number(therapistResult.data.total_earned_eth ?? 0),
+          supportedModes: normalizeSupportedModes(
+            therapistResult.data.supported_modes,
+          ),
+        });
+        setIsOnline(Boolean(therapistResult.data.is_online ?? true));
+      }
+
+      if (requestedResult.error) {
+        setDataError(requestedResult.error.message);
+      } else if (requestedResult.data) {
+        const session = requestedResult.data;
+        let patientAlias = truncateWallet(session.patient_wallet ?? "");
+
+        if (session.patient_wallet) {
+          const patientLookup = await supabase
+            .from("patients")
+            .select("username")
+            .eq("wallet_address", session.patient_wallet)
+            .maybeSingle();
+
+          if (!isCancelled && !patientLookup.error && patientLookup.data?.username) {
+            patientAlias = patientLookup.data.username;
+          }
+        }
+
+        if (!isCancelled) {
+          setIncomingRequest({
+            id: String(session.id),
+            patientWallet: String(session.patient_wallet ?? ""),
+            patientAlias,
+            amountEth: Number(session.amount_eth ?? 0.005),
+            intakeSummary:
+              session.intake_summary ??
+              "Patient shared an encrypted intake note. Open the chat to review further context.",
+          });
+        }
+      } else {
+        setIncomingRequest(null);
+      }
+
+      if (pendingResult.error) {
+        setDataError(pendingResult.error.message);
+      } else {
+        const total = (pendingResult.data ?? []).reduce((sum, session) => {
+          return sum + Number(session.amount_eth ?? 0);
+        }, 0);
+        setPendingEscrowEth(total);
+      }
+
+      if (completedResult.error) {
+        setDataError(completedResult.error.message);
+      } else {
+        const rows = completedResult.data ?? [];
+        const patientWallets = rows
+          .map((row) => row.patient_wallet as string | null)
+          .filter(Boolean) as string[];
+
+        const aliasMap = new Map<string, string>();
+        if (patientWallets.length > 0) {
+          const patientRows = await supabase
+            .from("patients")
+            .select("wallet_address, username")
+            .in("wallet_address", patientWallets);
+
+          if (!isCancelled && !patientRows.error) {
+            (patientRows.data ?? []).forEach((row) => {
+              aliasMap.set(String(row.wallet_address), String(row.username));
+            });
+          }
+        }
+
+        if (!isCancelled) {
+          setCompletedSessions(
+            rows.map((row) => {
+              const patientWallet = String(row.patient_wallet ?? "");
+              return {
+                id: String(row.id),
+                patientAlias:
+                  aliasMap.get(patientWallet) ?? truncateWallet(patientWallet),
+                amountEth: Number(row.amount_eth ?? 0),
+                txHash: String(row.tx_hash ?? "Pending settlement"),
+                endedAt: String(
+                  row.ended_at ??
+                    row.completed_at ??
+                    row.updated_at ??
+                    row.created_at ??
+                    "",
+                ),
+              };
+            }),
+          );
+        }
+      }
+
+      setIsInitialLoading(false);
+      setIsLoadingModes(false);
+    };
+
+    hydratePortal();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [therapistWallet]);
+
+  useEffect(() => {
+    if (!settingsMessage) {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
-      setIncomingRequest({
-        id: "req-001",
-        patientAlias: "calm_ocean_22",
-        escrowStatus: "0.05 ETH Locked in Contract",
-        intakeSummary:
-          "Patient reports high anxiety and career burnout. Shared 1 encrypted file.",
-      });
-    }, 2000);
+      setSettingsMessage("");
+    }, 2400);
 
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [incomingRequest, isOnline]);
+  }, [settingsMessage]);
 
-  const updateOnlineStatus = (nextStatus: boolean) => {
+  const updateOnlineStatus = async (nextStatus: boolean) => {
+    const previousStatus = isOnline;
     setIsOnline(nextStatus);
 
-    if (!nextStatus) {
-      setIncomingRequest(null);
-      setIsConnecting(false);
+    if (!supabase) {
+      return;
+    }
+
+    const { error } = await supabase
+      .from("therapists")
+      .update({ is_online: nextStatus })
+      .eq("wallet_address", therapistWallet);
+
+    if (error) {
+      setDataError(error.message);
+      setIsOnline(previousStatus);
     }
   };
 
-  const handleDecline = () => {
+  const handleDecline = async () => {
+    if (!incomingRequest || !supabase) {
+      return;
+    }
+
+    const { error } = await supabase
+      .from("sessions")
+      .update({ status: "declined" })
+      .eq("id", incomingRequest.id);
+
+    if (error) {
+      setDataError(error.message);
+      return;
+    }
+
     setIncomingRequest(null);
   };
 
-  const handleAccept = () => {
-    if (!incomingRequest || isConnecting) {
+  const handleAccept = async () => {
+    if (!incomingRequest || isConnecting || !supabase) {
       return;
     }
 
     setIsConnecting(true);
+    setDataError("");
 
-    window.setTimeout(() => {
-      router.push("/chat?role=therapist");
-    }, 1600);
+    const { error } = await supabase
+      .from("sessions")
+      .update({ status: "active" })
+      .eq("id", incomingRequest.id);
+
+    if (error) {
+      setDataError(error.message);
+      setIsConnecting(false);
+      return;
+    }
+
+    router.push(
+      `/chat?role=therapist&address=${encodeURIComponent(profile.walletAddress)}`,
+    );
+  };
+
+  const handleModeToggle = async (mode: SupportedMode) => {
+    if (!supabase || isSavingModes) {
+      return;
+    }
+
+    const nextModes = profile.supportedModes.includes(mode)
+      ? profile.supportedModes.filter((item) => item !== mode)
+      : [...profile.supportedModes, mode];
+
+    setIsSavingModes(true);
+    setSettingsError("");
+    setSettingsMessage("");
+
+    const payload = nextModes.map((item) =>
+      item === "Voice" ? "voice" : "text",
+    );
+
+    const { error } = await supabase
+      .from("therapists")
+      .update({ supported_modes: payload })
+      .eq("wallet_address", therapistWallet);
+
+    if (error) {
+      setSettingsError(error.message);
+      setIsSavingModes(false);
+      return;
+    }
+
+    setProfile((current) => ({
+      ...current,
+      supportedModes: nextModes,
+    }));
+    setSettingsMessage("Session modes updated.");
+    setIsSavingModes(false);
   };
 
   return (
@@ -104,7 +409,7 @@ export default function TherapistPortalPage() {
                 Provider Command Center
               </h1>
               <p className="mt-3 max-w-3xl text-base leading-7 text-[var(--text-muted)]">
-                SBT Verified • 0x8F2...3A1
+                SBT Verified • {truncateWallet(profile.walletAddress)}
               </p>
             </div>
 
@@ -135,32 +440,73 @@ export default function TherapistPortalPage() {
                 />
               </div>
 
-              <div className="liquid-glass-soft grid grid-cols-2 rounded-full p-1">
-                <button
-                  type="button"
-                  onClick={() => updateOnlineStatus(true)}
-                  className={`rounded-full px-4 py-3 text-sm font-medium transition ${
-                    isOnline
-                      ? "button-primary"
-                      : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                  }`}
-                >
-                  Online
-                </button>
-                <button
-                  type="button"
-                  onClick={() => updateOnlineStatus(false)}
-                  className={`rounded-full px-4 py-3 text-sm font-medium transition ${
-                    !isOnline
-                      ? "button-secondary text-[var(--text-primary)]"
-                      : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                  }`}
-                >
-                  Offline
-                </button>
-              </div>
+              <LiquidToggle
+                checked={isOnline}
+                onChange={updateOnlineStatus}
+                label="Provider online status"
+              />
             </div>
           </div>
+        </section>
+
+        <section className="mb-8">
+          <GlassCard className="glass-panel p-6">
+            <div className="mb-6 flex items-center justify-between gap-4">
+              <SectionHeading eyebrow="Settings" title="Supported Session Modes" />
+              <StatusBadge
+                label={isSavingModes ? "Saving" : "Synced"}
+                tone={isSavingModes ? "warning" : "success"}
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              {(["Voice", "Text"] as const).map((mode) => {
+                const enabled = profile.supportedModes.includes(mode);
+
+                return (
+                  <div
+                    key={mode}
+                    className={`liquid-glass-soft flex items-center justify-between rounded-[24px] px-5 py-4 text-left transition ${
+                      enabled ? "border-[var(--accent-primary)]/30" : ""
+                    } ${isLoadingModes || isSavingModes ? "opacity-60" : ""}`}
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-[var(--text-primary)]">
+                        {mode}
+                      </p>
+                      <p className="mt-1 text-xs text-[var(--text-muted)]">
+                        {mode === "Voice"
+                          ? "Offer encrypted voice sessions."
+                          : "Offer encrypted text-based sessions."}
+                      </p>
+                    </div>
+                    <LiquidToggle
+                      checked={enabled}
+                      onChange={() => handleModeToggle(mode)}
+                      label={`${mode} session mode`}
+                      disabled={isLoadingModes || isSavingModes}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+
+            {settingsError ? (
+              <div className="liquid-glass-soft mt-4 rounded-[22px] border border-red-400/20 bg-red-500/8 px-4 py-4">
+                <p className="text-sm text-red-600 dark:text-red-300">
+                  {settingsError}
+                </p>
+              </div>
+            ) : null}
+
+            {settingsMessage ? (
+              <div className="liquid-glass-soft mt-4 rounded-[22px] border border-emerald-400/20 bg-emerald-500/8 px-4 py-4">
+                <p className="text-sm text-emerald-700 dark:text-emerald-300">
+                  {settingsMessage}
+                </p>
+              </div>
+            ) : null}
+          </GlassCard>
         </section>
 
         <section className="grid gap-4 xl:grid-cols-[1.08fr_0.92fr]">
@@ -176,6 +522,14 @@ export default function TherapistPortalPage() {
               />
             </div>
 
+            {dataError ? (
+              <div className="liquid-glass-soft mb-4 rounded-[22px] border border-red-400/20 bg-red-500/8 px-4 py-4">
+                <p className="text-sm text-red-600 dark:text-red-300">
+                  {dataError}
+                </p>
+              </div>
+            ) : null}
+
             {!isOnline ? (
               <div className="liquid-glass-soft rounded-[28px] p-6 text-center">
                 <p className="text-lg font-semibold text-[var(--text-primary)]">
@@ -188,17 +542,25 @@ export default function TherapistPortalPage() {
               </div>
             ) : null}
 
-            {isOnline && !incomingRequest ? (
+            {isOnline && isInitialLoading ? (
               <div className="liquid-glass-soft rounded-[28px] p-6 text-center">
                 <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-black/5 dark:bg-white/10">
                   <span className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--text-primary)] border-t-transparent" />
                 </div>
                 <p className="mt-5 text-lg font-semibold text-[var(--text-primary)]">
-                  Waiting for secure session requests...
+                  Loading provider queue...
+                </p>
+              </div>
+            ) : null}
+
+            {isOnline && !isInitialLoading && !incomingRequest ? (
+              <div className="liquid-glass-soft rounded-[28px] p-6 text-center">
+                <p className="text-lg font-semibold text-[var(--text-primary)]">
+                  No pending requests
                 </p>
                 <p className="mt-3 text-sm leading-7 text-[var(--text-muted)]">
-                  Verified patient requests will appear here after escrow is
-                  locked on-chain.
+                  New escrow-backed bookings will appear here when a patient
+                  requests a session.
                 </p>
               </div>
             ) : null}
@@ -213,8 +575,11 @@ export default function TherapistPortalPage() {
                     <h2 className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
                       {incomingRequest.patientAlias}
                     </h2>
+                    <p className="mt-3 text-sm text-[var(--text-muted)]">
+                      {truncateWallet(incomingRequest.patientWallet)}
+                    </p>
                   </div>
-                  <StatusBadge label="New Request" tone="success" />
+                  <StatusBadge label="Requested" tone="warning" />
                 </div>
 
                 <div className="mt-6 rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-4">
@@ -222,7 +587,7 @@ export default function TherapistPortalPage() {
                     Escrow Status
                   </p>
                   <p className="mt-2 text-lg font-semibold text-emerald-600 dark:text-emerald-300">
-                    {incomingRequest.escrowStatus}
+                    {formatEth(incomingRequest.amountEth)} Locked in Contract
                   </p>
                 </div>
 
@@ -265,10 +630,7 @@ export default function TherapistPortalPage() {
 
           <GlassCard className="glass-panel p-6">
             <div className="mb-6 flex items-center justify-between gap-4">
-              <SectionHeading
-                eyebrow="Financials"
-                title="Earnings & Escrow"
-              />
+              <SectionHeading eyebrow="Financials" title="Earnings & Escrow" />
               <StatusBadge label="Wallet Synced" tone="success" />
             </div>
 
@@ -276,10 +638,10 @@ export default function TherapistPortalPage() {
               <div className="liquid-glass-soft rounded-[24px] p-5">
                 <p className="text-sm text-[var(--text-muted)]">Pending Escrow</p>
                 <p className="mt-3 text-3xl font-semibold text-[var(--text-primary)]">
-                  0.05 ETH
+                  {formatEth(pendingEscrowEth)}
                 </p>
                 <p className="mt-2 text-sm text-[var(--text-muted)]">
-                  Locked for the active incoming session request.
+                  Sum of all active sessions currently held in escrow.
                 </p>
               </div>
               <div className="liquid-glass-soft rounded-[24px] p-5">
@@ -287,10 +649,10 @@ export default function TherapistPortalPage() {
                   Available to Claim
                 </p>
                 <p className="mt-3 text-3xl font-semibold text-[var(--text-primary)]">
-                  1.25 ETH
+                  {formatEth(profile.totalEarnedEth)}
                 </p>
                 <p className="mt-2 text-sm text-[var(--text-muted)]">
-                  Ready to withdraw after therapist-side confirmation.
+                  Synced from therapist earnings recorded in Supabase.
                 </p>
               </div>
             </div>
@@ -307,27 +669,36 @@ export default function TherapistPortalPage() {
                 Recent Completed Sessions
               </p>
               <div className="mt-4 space-y-3">
-                {mockCompletedSessions.map((session) => (
+                {completedSessions.length === 0 ? (
+                  <div className="liquid-glass-soft rounded-[22px] border border-white/5 px-4 py-4">
+                    <p className="text-sm text-[var(--text-muted)]">
+                      No completed sessions yet.
+                    </p>
+                  </div>
+                ) : null}
+
+                {completedSessions.map((session) => (
                   <div
                     key={session.id}
-                    className="liquid-glass-soft flex items-center justify-between gap-4 rounded-[24px] px-4 py-4"
+                    className="liquid-glass-soft rounded-[22px] border border-white/5 px-4 py-4"
                   >
-                    <div>
-                      <p className="text-sm font-medium text-[var(--text-primary)]">
-                        {session.patientAlias}
-                      </p>
-                      <p className="mt-1 font-mono text-xs text-[var(--text-muted)]">
-                        Tx: {session.txHash} successful
-                      </p>
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <p className="font-medium text-[var(--text-primary)]">
+                          {session.patientAlias}
+                        </p>
+                        <p className="mt-1 text-sm text-[var(--text-muted)]">
+                          {formatSessionDate(session.endedAt)}
+                        </p>
+                      </div>
+                      <StatusBadge label="Completed" tone="success" />
                     </div>
-                    <div className="text-right">
-                      <p className="text-sm font-semibold text-[var(--text-primary)]">
-                        {session.amount}
-                      </p>
-                      <p className="mt-1 text-xs text-[var(--text-faint)]">
-                        Claimed
-                      </p>
-                    </div>
+                    <p className="mt-4 text-sm text-[var(--text-muted)]">
+                      {formatEth(session.amountEth)} settled
+                    </p>
+                    <p className="mt-1 text-xs uppercase tracking-[0.18em] text-[var(--text-faint)]">
+                      Tx: {session.txHash}
+                    </p>
                   </div>
                 ))}
               </div>

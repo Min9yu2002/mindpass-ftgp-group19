@@ -3,17 +3,16 @@
 import { useEffect, useState } from "react";
 
 type AuthMode = "create" | "login" | "therapist";
+type PatientAuthMode = Exclude<AuthMode, "therapist">;
 
 type AuthTabsProps = {
-  mode: AuthMode;
-  onChange: (mode: AuthMode) => void;
+  mode: PatientAuthMode;
+  onChange: (mode: PatientAuthMode) => void;
 };
 
-// 替換這裡的文案，直接把 Web3 的靈魂寫在 UI 上
-const tabs: { value: AuthMode; label: string }[] = [
-  { value: "create", label: "Create Profile" }, // 避免用 Account，用 Profile 更有匿名感
-  { value: "login", label: "Wallet Login" },    // 明確告訴使用者這是錢包登入
-  { value: "therapist", label: "Therapist (SBT)" }, // 加上 SBT (靈魂綁定代幣)，展現學術與技術專業度
+const tabs: { value: PatientAuthMode; label: string }[] = [
+  { value: "create", label: "Initialize Vault" },
+  { value: "login", label: "Quick Access" },
 ];
 
 export default function AuthTabs({ mode, onChange }: AuthTabsProps) {
@@ -31,7 +30,10 @@ export default function AuthTabs({ mode, onChange }: AuthTabsProps) {
   }, [activeIndex]);
 
   return (
-    <div className={`auth-switcher liquid-glass-soft auth-switcher--${mode}`}>
+    <div
+      className={`auth-switcher liquid-glass-soft auth-switcher--${mode}`}
+      style={{ ["--auth-tab-count" as string]: tabs.length }}
+    >
       <div
         className={`auth-switcher__indicator ${motionClass}`}
         style={{ transform: `translateX(${activeIndex * 100}%)` }}

@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
 import { createServerSupabaseClient } from "../../../lib/supabase-server";
+import {
+  getTherapistDisplayName,
+  getTherapistDisplaySpecialty,
+} from "../../../lib/therapist-display";
 
 function normalizeLanguages(value: unknown) {
   if (Array.isArray(value)) {
@@ -16,12 +20,37 @@ function normalizeLanguages(value: unknown) {
   return [];
 }
 
+function normalizeSupportedModes(value: unknown): ("Video" | "Text")[] {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(",")
+      : [];
+
+  return values
+    .map((item) => String(item).trim().toLowerCase())
+    .filter(Boolean)
+    .map((item) => {
+      if (item === "chat") {
+        return "Text";
+      }
+
+      return item === "video" ? "Video" : "Text";
+    })
+    .filter((item, index, array) => array.indexOf(item) === index) as (
+    | "Video"
+    | "Text"
+  )[];
+}
+
 export async function GET() {
   try {
     const supabase = createServerSupabaseClient();
     const { data, error } = await supabase
       .from("therapists")
-      .select("*")
+      .select(
+        "id, wallet_address, full_name, legal_name, specialty, clinical_specialty, bio, languages, supported_modes, is_online, rating, availability, availability_text",
+      )
       .order("is_online", { ascending: false })
       .order("rating", { ascending: false });
 
@@ -31,24 +60,19 @@ export async function GET() {
 
     const therapists = (data ?? []).map((therapist) => ({
       id: therapist.id,
-      name:
-        therapist.name ??
-        therapist.full_name ??
-        therapist.display_name ??
-        "Unknown therapist",
-      specialty:
-        therapist.specialty ?? therapist.clinical_specialty ?? "General support",
+      name: getTherapistDisplayName(therapist),
+      specialty: getTherapistDisplaySpecialty(therapist),
       languages: normalizeLanguages(therapist.languages),
-      bio: therapist.bio ?? therapist.description ?? "",
-      isOnline: Boolean(therapist.is_online ?? therapist.isOnline),
+      bio: therapist.bio ?? "",
+      isOnline: Boolean(therapist.is_online),
       rating: Number(therapist.rating ?? 0),
       availability:
         therapist.availability ??
         therapist.availability_text ??
         "Availability unavailable",
-      mode: therapist.mode ?? therapist.session_mode ?? "Video",
-      walletAddress:
-        therapist.wallet_address ?? therapist.walletAddress ?? "",
+      mode: "Video",
+      walletAddress: therapist.wallet_address ?? "",
+      supportedModes: normalizeSupportedModes(therapist.supported_modes),
     }));
 
     return NextResponse.json({ data: therapists });

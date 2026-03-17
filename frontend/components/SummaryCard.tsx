@@ -6,7 +6,7 @@ type SummaryCardProps = {
   value: string;
   detail: string;
   badge?: string;
-  tone?: "neutral" | "success" | "warning";
+  tone?: "neutral" | "success" | "warning" | "brand";
 };
 
 export default function SummaryCard({

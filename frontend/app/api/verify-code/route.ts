@@ -43,6 +43,13 @@ export async function POST(request: Request) {
       );
     }
 
+    const depositAmount = Number(
+      redeemCode.amount_eth ??
+        redeemCode.amount ??
+        redeemCode.subsidy_amount_eth ??
+        0.005,
+    );
+
     const { error: updateRedeemCodeError } = await supabase
       .from("redeem_codes")
       .update({
@@ -63,6 +70,7 @@ export async function POST(request: Request) {
       {
         wallet_address: normalizedWallet,
         username: normalizedUsername,
+        total_deposits: depositAmount,
       },
       {
         onConflict: "wallet_address",
@@ -76,10 +84,24 @@ export async function POST(request: Request) {
       );
     }
 
+    const { data: patient, error: patientFetchError } = await supabase
+      .from("patients")
+      .select("wallet_address, username, total_deposits")
+      .eq("wallet_address", normalizedWallet)
+      .maybeSingle();
+
+    if (patientFetchError) {
+      return NextResponse.json(
+        { error: patientFetchError.message },
+        { status: 500 },
+      );
+    }
+
     return NextResponse.json({
       data: {
-        walletAddress: normalizedWallet,
-        username: normalizedUsername,
+        walletAddress: String(patient?.wallet_address ?? normalizedWallet),
+        username: String(patient?.username ?? normalizedUsername),
+        totalDeposits: Number(patient?.total_deposits ?? depositAmount),
       },
     });
   } catch (error) {
