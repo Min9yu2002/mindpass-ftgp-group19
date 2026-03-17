@@ -1,0 +1,649 @@
+.app-shell,
+.app-shell-subtle {
+  min-height: 100vh;
+  color: var(--text-primary);
+  background: transparent;
+}
+
+.liquid-glass,
+.liquid-glass-soft,
+.liquid-glass-strong,
+.liquid-glass-floating,
+.liquid-glass-interactive {
+  isolation: isolate;
+  overflow: hidden;
+  border: 1px solid var(--glass-edge-dark);
+  box-shadow:
+    var(--glass-outer-shadow),
+    var(--glass-inner-depth);
+  backdrop-filter: var(--glass-filter);
+  -webkit-backdrop-filter: var(--glass-filter);
+}
+
+.liquid-glass,
+.liquid-glass-soft,
+.liquid-glass-strong {
+  position: relative;
+}
+
+.liquid-glass::before,
+.liquid-glass-soft::before,
+.liquid-glass-strong::before,
+.liquid-glass-floating::before,
+.liquid-glass-interactive::before,
+.liquid-glass::after,
+.liquid-glass-soft::after,
+.liquid-glass-strong::after,
+.liquid-glass-floating::after,
+.liquid-glass-interactive::after {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.liquid-glass {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--glass-tint) 100%, transparent), color-mix(in srgb, var(--glass-tint-soft) 84%, transparent)),
+    var(--glass-ambient-soft);
+}
+
+.liquid-glass-soft {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--glass-tint-soft) 100%, transparent), color-mix(in srgb, var(--glass-tint-soft) 76%, transparent)),
+    var(--glass-ambient-soft);
+  box-shadow:
+    0 18px 44px color-mix(in srgb, var(--glass-edge-dark) 40%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--glass-edge) 72%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--glass-edge-dark) 62%, transparent),
+    inset 0 14px 22px color-mix(in srgb, var(--glass-edge) 18%, transparent);
+}
+
+.liquid-glass-strong,
+.liquid-glass-floating {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--glass-tint-strong) 100%, transparent), color-mix(in srgb, var(--glass-tint) 88%, transparent)),
+    var(--glass-ambient);
+  border-color: color-mix(in srgb, var(--glass-edge-dark) 72%, var(--glass-edge) 28%);
+  box-shadow:
+    var(--glass-outer-shadow-strong),
+    var(--glass-inner-depth);
+  backdrop-filter: var(--glass-filter-strong);
+  -webkit-backdrop-filter: var(--glass-filter-strong);
+}
+
+.liquid-glass-interactive {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--glass-tint) 96%, transparent), color-mix(in srgb, var(--glass-tint-soft) 86%, transparent)),
+    var(--glass-ambient-soft);
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    filter 180ms ease,
+    border-color 180ms ease,
+    background-color 180ms ease;
+}
+
+.liquid-glass::before,
+.liquid-glass-soft::before,
+.liquid-glass-strong::before,
+.liquid-glass-floating::before,
+.liquid-glass-interactive::before {
+  inset: 1px 1px auto 1px;
+  height: 46%;
+  background: var(--glass-sheen);
+  opacity: 0.95;
+}
+
+.liquid-glass-soft::before {
+  background: var(--glass-sheen-soft);
+  opacity: 0.9;
+}
+
+.liquid-glass::after,
+.liquid-glass-soft::after,
+.liquid-glass-strong::after,
+.liquid-glass-floating::after,
+.liquid-glass-interactive::after {
+  inset: auto -12% -32% auto;
+  width: 48%;
+  height: 58%;
+  background:
+    radial-gradient(circle, color-mix(in srgb, var(--accent-primary) 18%, transparent) 0%, transparent 70%);
+  filter: blur(24px);
+  opacity: 0.9;
+}
+
+.liquid-glass-floating {
+  box-shadow:
+    var(--glass-outer-shadow-strong),
+    inset 0 1px 0 color-mix(in srgb, var(--glass-edge) 86%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--glass-edge-dark) 72%, transparent),
+    inset 0 18px 24px color-mix(in srgb, var(--glass-edge) 14%, transparent);
+}
+
+.liquid-glass-floating::after {
+  width: 52%;
+  height: 64%;
+  opacity: 1;
+}
+
+.glass-navbar-surface {
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--glass-tint-strong) 90%, transparent),
+      color-mix(in srgb, var(--glass-tint) 44%, transparent)),
+    radial-gradient(circle at 16% 12%, color-mix(in srgb, var(--glass-edge) 30%, transparent), transparent 34%),
+    radial-gradient(circle at 84% 78%, color-mix(in srgb, var(--accent-primary) 5%, transparent), transparent 28%);
+  border-color: color-mix(in srgb, var(--glass-edge) 42%, var(--glass-edge-dark) 58%);
+  box-shadow:
+    0 24px 54px color-mix(in srgb, var(--glass-edge-dark) 18%, transparent),
+    0 8px 18px color-mix(in srgb, var(--glass-edge-dark) 10%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--glass-edge) 96%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--glass-edge-dark) 46%, transparent),
+    inset 0 12px 20px color-mix(in srgb, var(--glass-edge) 10%, transparent);
+  backdrop-filter: blur(28px) saturate(1.6) brightness(1.05);
+  -webkit-backdrop-filter: blur(28px) saturate(1.6) brightness(1.05);
+}
+
+.glass-navbar-surface::before {
+  background: linear-gradient(180deg,
+      color-mix(in srgb, var(--glass-edge) 92%, transparent) 0%,
+      color-mix(in srgb, var(--glass-edge) 42%, transparent) 18%,
+      rgba(255, 255, 255, 0) 58%);
+  opacity: 1;
+}
+
+.dark .glass-navbar-surface {
+  background:
+    linear-gradient(180deg,
+      rgba(22, 24, 33, 0.7) 0%,
+      rgba(18, 20, 29, 0.56) 100%),
+    radial-gradient(circle at 18% 12%, rgba(255, 255, 255, 0.12), transparent 34%),
+    radial-gradient(circle at 84% 78%, rgba(123, 97, 255, 0.06), transparent 28%);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow:
+    0 28px 68px rgba(0, 0, 0, 0.4),
+    0 10px 22px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 rgba(4, 6, 10, 0.42),
+    inset 0 18px 24px rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(32px) saturate(1.75) brightness(1.06);
+  -webkit-backdrop-filter: blur(32px) saturate(1.75) brightness(1.06);
+}
+
+.dark .glass-navbar-surface::before {
+  background: linear-gradient(180deg,
+      rgba(255, 255, 255, 0.24) 0%,
+      rgba(255, 255, 255, 0.1) 24%,
+      rgba(255, 255, 255, 0) 62%);
+  opacity: 0.98;
+}
+
+.liquid-glass-interactive:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    var(--glass-outer-shadow-strong),
+    inset 0 1px 0 color-mix(in srgb, var(--glass-edge) 82%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--glass-edge-dark) 72%, transparent),
+    inset 0 16px 22px color-mix(in srgb, var(--glass-edge) 18%, transparent);
+}
+
+.glass-panel {
+  border-radius: 28px;
+  padding: 1.5rem;
+}
+
+.glass-navbar {
+  border-radius: 9999px;
+  padding: 0.75rem 1rem;
+}
+
+.theme-switcher {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  width: min(15.5rem, calc(100vw - 3rem));
+  padding: 0.4rem 0.5rem 0.5rem;
+  border-radius: 9999px;
+  overflow: hidden;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--glass-edge) 16%, transparent),
+    inset 1.5px 2.5px 0 -1px color-mix(in srgb, var(--glass-edge) 84%, transparent),
+    inset -2px -3px 0 -2px color-mix(in srgb, var(--glass-edge) 56%, transparent),
+    inset 0 -1px 6px 0 color-mix(in srgb, var(--glass-edge-dark) 12%, transparent),
+    0 10px 24px color-mix(in srgb, var(--glass-edge-dark) 24%, transparent),
+    0 2px 8px color-mix(in srgb, var(--glass-edge-dark) 14%, transparent);
+}
+
+.theme-switcher__indicator {
+  position: absolute;
+  top: 0.28rem;
+  bottom: 0.38rem;
+  left: 0.42rem;
+  width: calc((100% - 1rem) / 3);
+  border-radius: 9999px;
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--glass-tint-strong) 98%, transparent),
+      color-mix(in srgb, var(--glass-tint) 86%, transparent)),
+    var(--glass-ambient-soft);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--glass-edge) 18%, transparent),
+    inset 2px 1px 0 -1px color-mix(in srgb, var(--glass-edge) 92%, transparent),
+    inset -1.5px -1px 0 -1px color-mix(in srgb, var(--glass-edge) 78%, transparent),
+    inset -1px 2px 3px -1px color-mix(in srgb, var(--glass-edge-dark) 20%, transparent),
+    inset 0 -4px 1px -2px color-mix(in srgb, var(--glass-edge-dark) 12%, transparent),
+    0 3px 10px color-mix(in srgb, var(--glass-edge-dark) 12%, transparent);
+  transition:
+    transform 400ms cubic-bezier(1, 0, 0.4, 1),
+    background-color 400ms cubic-bezier(1, 0, 0.4, 1),
+    box-shadow 400ms cubic-bezier(1, 0, 0.4, 1);
+  will-change: transform;
+}
+
+.theme-switcher--light .theme-switcher__indicator {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.82) 0%,
+      rgba(247, 250, 248, 0.72) 100%),
+    radial-gradient(circle at 22% 16%, rgba(255, 255, 255, 0.58), transparent 40%),
+    radial-gradient(circle at 82% 78%, rgba(16, 185, 129, 0.05), transparent 30%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.36),
+    inset 2px 1px 0 -1px rgba(255, 255, 255, 0.72),
+    inset -1.5px -1px 0 -1px rgba(255, 255, 255, 0.52),
+    inset -1px 2px 3px -1px rgba(18, 28, 22, 0.08),
+    inset 0 -4px 1px -2px rgba(18, 28, 22, 0.05),
+    0 3px 8px rgba(18, 28, 22, 0.06);
+}
+
+.theme-switcher--light .theme-switcher__option--active {
+  color: var(--accent-primary-strong);
+}
+
+.theme-switcher--light .theme-switcher__option:hover {
+  color: var(--accent-primary);
+}
+
+.theme-switcher__indicator--forward {
+  animation: theme-switcher-slide-forward 440ms ease;
+  transform-origin: left center;
+}
+
+.theme-switcher__indicator--backward {
+  animation: theme-switcher-slide-backward 440ms ease;
+  transform-origin: right center;
+}
+
+.theme-switcher__option {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 0.8rem 0.7rem;
+  border-radius: 9999px;
+  transition:
+    color 180ms ease,
+    transform 180ms ease,
+    filter 180ms ease,
+    opacity 180ms ease;
+}
+
+.theme-switcher__option:hover {
+  color: var(--accent-primary-strong);
+  cursor: pointer;
+}
+
+.theme-switcher__option:hover .theme-switcher__icon {
+  transform: scale(1.14);
+}
+
+.theme-switcher__option--active {
+  color: var(--text-primary);
+  cursor: default;
+}
+
+.theme-switcher__icon {
+  display: inline-flex;
+  width: 1rem;
+  height: 1rem;
+  line-height: 1;
+  transition: transform 200ms cubic-bezier(0.5, 0, 0, 1);
+}
+
+.theme-switcher__icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.theme-switcher__label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.auth-switcher {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  width: 100%;
+  padding: 0.5rem;
+  border-radius: 9999px;
+}
+
+.auth-switcher__indicator {
+  position: absolute;
+  top: 0.5rem;
+  bottom: 0.5rem;
+  left: 0.5rem;
+  width: calc((100% - 1rem) / 3);
+  border-radius: 9999px;
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--glass-tint-strong) 98%, transparent),
+      color-mix(in srgb, var(--glass-tint) 86%, transparent)),
+    var(--glass-ambient-soft);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--glass-edge) 16%, transparent),
+    inset 2px 1px 0 -1px color-mix(in srgb, var(--glass-edge) 90%, transparent),
+    inset -1.5px -1px 0 -1px color-mix(in srgb, var(--glass-edge) 72%, transparent),
+    inset -1px 2px 3px -1px color-mix(in srgb, var(--glass-edge-dark) 18%, transparent),
+    inset 0 -4px 1px -2px color-mix(in srgb, var(--glass-edge-dark) 10%, transparent),
+    0 3px 10px color-mix(in srgb, var(--glass-edge-dark) 10%, transparent);
+  transition:
+    transform 400ms cubic-bezier(1, 0, 0.4, 1),
+    box-shadow 400ms cubic-bezier(1, 0, 0.4, 1);
+  will-change: transform;
+}
+
+.auth-switcher__indicator,
+.auth-switcher--create .auth-switcher__indicator,
+.auth-switcher--login .auth-switcher__indicator,
+.auth-switcher--therapist .auth-switcher__indicator {
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--glass-tint-strong) 98%, transparent),
+      color-mix(in srgb, var(--glass-tint) 86%, transparent)),
+    var(--glass-ambient-soft);
+}
+
+.light .auth-switcher__indicator {
+  background:
+    linear-gradient(180deg,
+      rgba(255, 255, 255, 0.88) 0%,
+      rgba(246, 248, 247, 0.78) 100%),
+    radial-gradient(circle at 22% 16%, rgba(255, 255, 255, 0.5), transparent 40%),
+    radial-gradient(circle at 82% 78%, rgba(16, 185, 129, 0.04), transparent 30%);
+  box-shadow:
+    inset 0 0 0 1px rgba(18, 28, 22, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    inset 0 -1px 0 rgba(18, 28, 22, 0.06),
+    0 4px 12px rgba(18, 28, 22, 0.08);
+}
+
+.auth-switcher__indicator--forward {
+  animation: theme-switcher-slide-forward 440ms ease;
+  transform-origin: left center;
+}
+
+.auth-switcher__indicator--backward {
+  animation: theme-switcher-slide-backward 440ms ease;
+  transform-origin: right center;
+}
+
+.auth-switcher__option {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  justify-content: center;
+  background: transparent;
+}
+
+.dark .theme-switcher {
+  background:
+    linear-gradient(180deg,
+      rgba(22, 24, 33, 0.86) 0%,
+      rgba(18, 20, 29, 0.8) 100%),
+    radial-gradient(circle at 18% 12%, rgba(255, 255, 255, 0.1), transparent 34%),
+    radial-gradient(circle at 84% 78%, rgba(123, 97, 255, 0.1), transparent 28%);
+  backdrop-filter: blur(40px) saturate(1.95) brightness(1.02);
+  -webkit-backdrop-filter: blur(40px) saturate(1.95) brightness(1.02);
+}
+
+.dark .theme-switcher__indicator {
+  background:
+    linear-gradient(180deg,
+      rgba(62, 66, 85, 0.56) 0%,
+      rgba(38, 42, 57, 0.5) 100%),
+    radial-gradient(circle at 24% 18%, rgba(255, 255, 255, 0.18), transparent 42%);
+}
+
+@keyframes theme-switcher-slide-forward {
+  0% {
+    scale: 1 1;
+  }
+
+  50% {
+    scale: 1.12 1;
+  }
+
+  100% {
+    scale: 1 1;
+  }
+}
+
+@keyframes theme-switcher-slide-backward {
+  0% {
+    scale: 1 1;
+  }
+
+  50% {
+    scale: 1.12 1;
+  }
+
+  100% {
+    scale: 1 1;
+  }
+}
+
+.glass-input {
+  border-radius: 22px;
+  padding: 0.875rem 1rem;
+}
+
+.glass-highlight {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent-primary) 28%, var(--glass-edge-dark));
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--accent-primary) 18%, transparent),
+      color-mix(in srgb, var(--accent-primary) 6%, transparent)),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--glass-tint) 94%, transparent),
+      color-mix(in srgb, var(--glass-tint-soft) 82%, transparent));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--glass-edge) 74%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--glass-edge-dark) 64%, transparent),
+    0 16px 36px color-mix(in srgb, var(--accent-primary) 16%, transparent);
+}
+
+.glass-chip,
+.glass-chip-muted {
+  position: relative;
+  overflow: hidden;
+  border-radius: 9999px;
+  border: 1px solid color-mix(in srgb, var(--glass-edge-dark) 78%, var(--glass-edge) 22%);
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--glass-tint) 96%, transparent),
+      color-mix(in srgb, var(--glass-tint-soft) 82%, transparent)),
+    var(--glass-ambient-soft);
+  box-shadow:
+    0 10px 26px color-mix(in srgb, var(--glass-edge-dark) 32%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--glass-edge) 72%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--glass-edge-dark) 58%, transparent);
+  backdrop-filter: blur(22px) saturate(1.55) brightness(1.04);
+  -webkit-backdrop-filter: blur(22px) saturate(1.55) brightness(1.04);
+}
+
+.glass-chip-muted {
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--glass-tint-soft) 100%, transparent),
+      color-mix(in srgb, var(--glass-tint-soft) 78%, transparent)),
+    var(--glass-ambient-soft);
+}
+
+.button-primary,
+.button-secondary,
+.nav-link,
+.auth-tab {
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease,
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    filter 180ms ease;
+}
+
+.button-primary {
+  background: linear-gradient(180deg, var(--accent-primary-strong) 0%, var(--accent-primary) 100%);
+  color: var(--bg-primary);
+  box-shadow: var(--accent-shadow);
+}
+
+.button-primary:hover {
+  filter: brightness(1.06);
+}
+
+.button-secondary {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--glass-edge-dark) 78%, var(--glass-edge) 22%);
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--glass-tint-soft) 100%, transparent),
+      color-mix(in srgb, var(--glass-tint-soft) 80%, transparent)),
+    var(--glass-ambient-soft);
+  color: var(--text-secondary);
+  box-shadow:
+    0 14px 28px color-mix(in srgb, var(--glass-edge-dark) 30%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--glass-edge) 74%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--glass-edge-dark) 56%, transparent);
+  backdrop-filter: blur(22px) saturate(1.45) brightness(1.03);
+  -webkit-backdrop-filter: blur(22px) saturate(1.45) brightness(1.03);
+}
+
+.button-secondary:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--glass-edge-dark) 60%, var(--glass-edge) 40%);
+}
+
+.nav-link {
+  color: var(--text-muted);
+}
+
+.nav-link:hover {
+  color: var(--text-primary);
+}
+
+.auth-tab {
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  padding: 0.625rem 0.95rem;
+}
+
+.auth-tab:hover {
+  color: var(--text-primary);
+}
+
+.auth-tab-active {
+  color: var(--text-primary);
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.form-input {
+  width: 100%;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--glass-edge-dark) 74%, var(--glass-edge) 26%);
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--glass-tint-soft) 96%, transparent),
+      color-mix(in srgb, var(--glass-tint-soft) 80%, transparent)),
+    var(--glass-ambient-soft);
+  padding: 0.95rem 1rem;
+  color: var(--text-primary);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--glass-edge) 72%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--glass-edge-dark) 56%, transparent),
+    0 10px 22px color-mix(in srgb, var(--glass-edge-dark) 14%, transparent);
+  outline: none;
+  backdrop-filter: blur(16px) saturate(1.3) brightness(1.03);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3) brightness(1.03);
+}
+
+.form-input::placeholder {
+  color: color-mix(in srgb, var(--text-primary) 32%, transparent);
+}
+
+.form-input:focus {
+  border-color: color-mix(in srgb, var(--accent-primary) 40%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--glass-edge) 72%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--glass-edge-dark) 52%, transparent),
+    0 0 0 3px color-mix(in srgb, var(--accent-primary) 14%, transparent),
+    0 18px 34px color-mix(in srgb, var(--accent-primary) 12%, transparent);
+}
+
+.section-anchor {
+  scroll-margin-top: 120px;
+}
+
+.light .text-white {
+  color: var(--text-primary) !important;
+}
+
+.light .text-white\/40,
+.light .text-white\/50,
+.light .text-white\/60,
+.light .text-white\/65,
+.light .text-white\/68,
+.light .text-white\/70,
+.light .text-white\/74,
+.light .text-white\/80 {
+  color: var(--text-muted) !important;
+}
+
+.light .text-violet-100,
+.light .text-violet-100\/55,
+.light .text-violet-100\/85,
+.light .text-violet-200,
+.light .text-violet-200\/72,
+.light .text-violet-200\/80,
+.light .text-violet-200\/85,
+.light .text-violet-300,
+.light .text-violet-300\/70 {
+  color: var(--accent-primary-strong) !important;
+}
+
+.light .bg-black\/15,
+.light .bg-black\/20,
+.light .bg-black\/40,
+.light .bg-black\/50 {
+  background-color: rgba(255, 255, 255, 0.46) !important;
+}

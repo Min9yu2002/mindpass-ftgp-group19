@@ -1,0 +1,170 @@
+@theme inline {
+  --color-background: var(--bg-primary);
+  --color-foreground: var(--text-primary);
+  --color-accent: var(--accent-primary);
+  --font-sans: Arial, Helvetica, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+:root {
+  color-scheme: light;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f6f7f8;
+  --bg-elevated: #fcfcfc;
+  --bg-surface: rgba(255, 255, 255, 0.78);
+  --bg-surface-strong: rgba(255, 255, 255, 0.9);
+  --bg-surface-soft: rgba(255, 255, 255, 0.68);
+  --text-primary: #000000;
+  --text-secondary: rgba(16, 22, 18, 0.86);
+  --text-muted: rgba(0, 0, 0, 0.7);
+  --text-faint: rgba(0, 0, 0, 0.6);
+  --accent-primary: #10b981;
+  --accent-primary-strong: #059669;
+  --accent-soft: rgba(16, 185, 129, 0.08);
+  --accent-soft-strong: rgba(16, 185, 129, 0.16);
+  --glass-fill: rgba(255, 255, 255, 0.7);
+  --glass-fill-strong: rgba(255, 255, 255, 0.84);
+  --glass-fill-soft: rgba(255, 255, 255, 0.64);
+  --glass-border: rgba(16, 22, 18, 0.08);
+  --glass-border-soft: rgba(16, 22, 18, 0.07);
+  --glass-highlight: rgba(255, 255, 255, 0.68);
+  --glass-highlight-soft: rgba(255, 255, 255, 0.42);
+  --glass-tint: rgba(255, 255, 255, 0.62);
+  --glass-tint-soft: rgba(255, 255, 255, 0.54);
+  --glass-tint-strong: rgba(255, 255, 255, 0.72);
+  --glass-edge: rgba(255, 255, 255, 0.78);
+  --glass-edge-soft: rgba(255, 255, 255, 0.54);
+  --glass-edge-dark: rgba(22, 29, 24, 0.06);
+  --glass-sheen: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.76) 0%,
+    rgba(255, 255, 255, 0.28) 22%,
+    rgba(255, 255, 255, 0) 62%
+  );
+  --glass-sheen-soft: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.56) 0%,
+    rgba(255, 255, 255, 0.12) 40%,
+    rgba(255, 255, 255, 0) 75%
+  );
+  --glass-inner-depth:
+    inset 0 1px 0 rgba(255, 255, 255, 0.82),
+    inset 0 -1px 0 rgba(23, 30, 24, 0.04),
+    inset 0 18px 24px rgba(255, 255, 255, 0.1);
+  --glass-outer-shadow:
+    0 20px 44px rgba(30, 42, 34, 0.08),
+    0 8px 18px rgba(30, 42, 34, 0.05);
+  --glass-outer-shadow-strong:
+    0 24px 56px rgba(30, 42, 34, 0.1),
+    0 10px 22px rgba(30, 42, 34, 0.06);
+  --glass-ambient:
+    radial-gradient(circle at 18% 14%, rgba(255, 255, 255, 0.42), transparent 42%),
+    radial-gradient(circle at 82% 76%, rgba(16, 185, 129, 0.04), transparent 34%);
+  --glass-ambient-soft:
+    radial-gradient(circle at 20% 16%, rgba(255, 255, 255, 0.3), transparent 38%),
+    radial-gradient(circle at 84% 78%, rgba(16, 185, 129, 0.03), transparent 28%);
+  --glass-filter: blur(24px) saturate(1.4) brightness(1.01);
+  --glass-filter-strong: blur(30px) saturate(1.55) brightness(1.02);
+  --shadow-soft: 0 14px 34px rgba(51, 67, 58, 0.08);
+  --glass-shadow:
+    0 16px 48px rgba(51, 67, 58, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.76),
+    inset 0 -1px 0 rgba(16, 22, 18, 0.03);
+  --glass-shadow-soft:
+    0 10px 24px rgba(51, 67, 58, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  --accent-shadow:
+    0 12px 28px rgba(16, 185, 129, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.44);
+  --shell-glow-1: rgba(16, 185, 129, 0.06);
+  --shell-glow-2: rgba(16, 185, 129, 0.03);
+  --shell-glow-3: rgba(255, 255, 255, 0.18);
+  --body-gradient:
+    linear-gradient(180deg, #ffffff 0%, #f6f7f8 100%);
+  --apple-glass-bg: rgba(255, 255, 255, 0.76);
+  --apple-glass-border: rgba(0, 0, 0, 0.05);
+  --apple-glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+}
+
+.dark {
+  color-scheme: dark;
+  --bg-primary: #05060a;
+  --bg-secondary: #090b12;
+  --bg-elevated: #10131b;
+  --bg-surface: rgba(255, 255, 255, 0.07);
+  --bg-surface-strong: rgba(255, 255, 255, 0.1);
+  --bg-surface-soft: rgba(255, 255, 255, 0.045);
+  --text-primary: #f5f7fb;
+  --text-secondary: rgba(245, 247, 251, 0.84);
+  --text-muted: rgba(245, 247, 251, 0.58);
+  --text-faint: rgba(245, 247, 251, 0.38);
+  --accent-primary: #7b61ff;
+  --accent-primary-strong: #8f7aff;
+  --accent-soft: rgba(123, 97, 255, 0.18);
+  --accent-soft-strong: rgba(123, 97, 255, 0.3);
+  --glass-fill: rgba(255, 255, 255, 0.075);
+  --glass-fill-strong: rgba(255, 255, 255, 0.11);
+  --glass-fill-soft: rgba(255, 255, 255, 0.045);
+  --glass-border: rgba(255, 255, 255, 0.14);
+  --glass-border-soft: rgba(255, 255, 255, 0.1);
+  --glass-highlight: rgba(255, 255, 255, 0.18);
+  --glass-highlight-soft: rgba(255, 255, 255, 0.08);
+  --glass-tint: rgba(24, 26, 34, 0.68);
+  --glass-tint-soft: rgba(20, 22, 31, 0.52);
+  --glass-tint-strong: rgba(30, 32, 41, 0.78);
+  --glass-edge: rgba(255, 255, 255, 0.22);
+  --glass-edge-soft: rgba(255, 255, 255, 0.12);
+  --glass-edge-dark: rgba(5, 7, 14, 0.28);
+  --glass-sheen: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.2) 0%,
+    rgba(255, 255, 255, 0.08) 26%,
+    rgba(255, 255, 255, 0) 64%
+  );
+  --glass-sheen-soft: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(255, 255, 255, 0.04) 34%,
+    rgba(255, 255, 255, 0) 74%
+  );
+  --glass-inner-depth:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -1px 0 rgba(6, 8, 14, 0.34),
+    inset 0 18px 24px rgba(255, 255, 255, 0.035);
+  --glass-outer-shadow:
+    0 26px 70px rgba(0, 0, 0, 0.3),
+    0 12px 28px rgba(0, 0, 0, 0.22);
+  --glass-outer-shadow-strong:
+    0 32px 86px rgba(0, 0, 0, 0.42),
+    0 14px 32px rgba(0, 0, 0, 0.26);
+  --glass-ambient:
+    radial-gradient(circle at 16% 12%, rgba(255, 255, 255, 0.16), transparent 36%),
+    radial-gradient(circle at 84% 78%, rgba(123, 97, 255, 0.14), transparent 34%);
+  --glass-ambient-soft:
+    radial-gradient(circle at 20% 14%, rgba(255, 255, 255, 0.1), transparent 34%),
+    radial-gradient(circle at 82% 78%, rgba(98, 120, 255, 0.12), transparent 28%);
+  --glass-filter: blur(28px) saturate(1.85) brightness(1.02);
+  --glass-filter-strong: blur(40px) saturate(1.95) brightness(1.04);
+  --shadow-soft: 0 18px 50px rgba(0, 0, 0, 0.32);
+  --glass-shadow:
+    0 20px 80px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.03);
+  --glass-shadow-soft:
+    0 12px 32px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --accent-shadow:
+    0 16px 40px rgba(115, 86, 255, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  --shell-glow-1: rgba(129, 92, 255, 0.18);
+  --shell-glow-2: rgba(98, 120, 255, 0.12);
+  --shell-glow-3: rgba(255, 255, 255, 0.04);
+  --body-gradient:
+    radial-gradient(circle at 10% 10%, rgba(129, 92, 255, 0.18), transparent 28%),
+    radial-gradient(circle at 85% 18%, rgba(98, 120, 255, 0.12), transparent 24%),
+    radial-gradient(circle at 50% 100%, rgba(255, 255, 255, 0.04), transparent 28%),
+    linear-gradient(180deg, #07080d 0%, #090b12 40%, #06070b 100%);
+  --apple-glass-bg: rgba(29, 29, 31, 0.7);
+  --apple-glass-border: rgba(255, 255, 255, 0.08);
+  --apple-glass-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
