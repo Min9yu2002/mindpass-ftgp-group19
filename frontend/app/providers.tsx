@@ -18,7 +18,7 @@ const config = getDefaultConfig({
   appName: "MindPass",
   projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID ?? "",
   chains: [sepolia],
-  ssr: true,
+  ssr: false,
 });
 
 export default function Providers({ children }: ProvidersProps) {
