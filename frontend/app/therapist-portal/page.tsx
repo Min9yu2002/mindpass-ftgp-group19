@@ -3,9 +3,27 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import GlassCard from "../../components/GlassCard";
+import { PROVIDER_REQUEST_UPDATED_EVENT } from "../../components/GlobalProviderIncomingRequestCard";
 import LiquidToggle from "../../components/LiquidToggle";
 import SectionHeading from "../../components/SectionHeading";
 import StatusBadge from "../../components/StatusBadge";
+import {
+  PAYMENT_WINDOW_MS,
+  SESSION_FEE_ETH,
+} from "../../lib/booking";
+import {
+  formatProviderQueueStatusLabel,
+  formatProviderQueueStatusTone,
+  formatSessionMode,
+} from "../../lib/session-formatting";
+import {
+  isProviderQueueSessionStatus,
+  normalizeSessionMode,
+  normalizeSessionStatus,
+  PROVIDER_QUEUE_SESSION_STATUSES,
+  type ProviderQueueSessionStatus,
+  type SessionMode,
+} from "../../lib/session-status";
 import { supabase } from "../../lib/supabase";
 
 type SupportedMode = "Voice" | "Text";
@@ -21,6 +39,8 @@ type IncomingRequest = {
   patientWallet: string;
   patientAlias: string;
   amountEth: number;
+  status: ProviderQueueSessionStatus;
+  sessionMode: SessionMode;
   intakeSummary: string;
 };
 
@@ -29,11 +49,19 @@ type CompletedSession = {
   patientAlias: string;
   amountEth: number;
   txHash: string;
-  endedAt: string;
+  completedAt: string;
 };
 
 const LEAD_THERAPIST_WALLET =
   "0x8Ec7F2F349111B2443A6C68691344B7d53d5B2cD".toLowerCase();
+const PORTAL_QUEUE_SELECT =
+  "id, patient_wallet, therapist_wallet, status, created_at, updated_at, session_mode, session_fee_eth, escrow_amount, amount_eth";
+const INCOMING_QUEUE_PRIORITY: ProviderQueueSessionStatus[] = [
+  "requested",
+  "accepted_awaiting_payment",
+  "funded",
+  "in_session",
+];
 
 function normalizeSupportedModes(value: unknown): SupportedMode[] {
   if (!Array.isArray(value)) {
@@ -93,6 +121,22 @@ function formatSessionDate(value: string) {
   });
 }
 
+function resolveIncomingQueueSession(
+  sessions: Record<string, unknown>[],
+): Record<string, unknown> | null {
+  for (const status of INCOMING_QUEUE_PRIORITY) {
+    const matchingSessions = sessions.filter(
+      (session) => normalizeSessionStatus(session.status) === status,
+    );
+
+    if (matchingSessions.length > 0) {
+      return matchingSessions[0] ?? null;
+    }
+  }
+
+  return sessions[0] ?? null;
+}
+
 export default function TherapistPortalPage() {
   const router = useRouter();
   const therapistWallet = useMemo(() => resolveTherapistWallet(), []);
@@ -114,6 +158,7 @@ export default function TherapistPortalPage() {
   const [settingsError, setSettingsError] = useState("");
   const [settingsMessage, setSettingsMessage] = useState("");
   const [dataError, setDataError] = useState("");
+  const [refreshNonce, setRefreshNonce] = useState(0);
 
   useEffect(() => {
     let isCancelled = false;
@@ -134,28 +179,29 @@ export default function TherapistPortalPage() {
       const therapistQuery = supabase
         .from("therapists")
         .select("wallet_address, supported_modes, total_earned_eth, is_online")
-        .eq("wallet_address", therapistWallet)
+        .ilike("wallet_address", therapistWallet)
         .maybeSingle();
 
       const requestedQuery = supabase
         .from("sessions")
-        .select("id, patient_wallet, amount_eth, status, intake_summary, created_at")
-        .eq("therapist_wallet", therapistWallet)
-        .eq("status", "requested")
+        .select(PORTAL_QUEUE_SELECT)
+        .ilike("therapist_wallet", therapistWallet)
+        .in("status", [...PROVIDER_QUEUE_SESSION_STATUSES])
         .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .limit(10);
 
       const pendingQuery = supabase
         .from("sessions")
-        .select("amount_eth")
-        .eq("therapist_wallet", therapistWallet)
-        .eq("status", "active");
+        .select("session_fee_eth, escrow_amount, amount_eth")
+        .ilike("therapist_wallet", therapistWallet)
+        .in("status", ["funded", "in_session"]);
 
       const completedQuery = supabase
         .from("sessions")
-        .select("id, patient_wallet, amount_eth, tx_hash, updated_at, ended_at, completed_at, created_at")
-        .eq("therapist_wallet", therapistWallet)
+        .select(
+          "id, patient_wallet, session_fee_eth, escrow_amount, amount_eth, complete_session_tx_hash, last_synced_tx_hash, updated_at, completed_at, created_at",
+        )
+        .ilike("therapist_wallet", therapistWallet)
         .eq("status", "completed")
         .order("updated_at", { ascending: false })
         .limit(3);
@@ -189,42 +235,70 @@ export default function TherapistPortalPage() {
 
       if (requestedResult.error) {
         setDataError(requestedResult.error.message);
-      } else if (requestedResult.data) {
-        const session = requestedResult.data;
-        let patientAlias = truncateWallet(session.patient_wallet ?? "");
+      } else {
+        const requestedRows = ((requestedResult.data ?? []) as Record<string, unknown>[])
+          .filter((session) =>
+            isProviderQueueSessionStatus(normalizeSessionStatus(session.status)),
+          );
+        const session = resolveIncomingQueueSession(requestedRows);
 
-        if (session.patient_wallet) {
-          const patientLookup = await supabase
-            .from("patients")
-            .select("username")
-            .eq("wallet_address", session.patient_wallet)
-            .maybeSingle();
+        if (!session) {
+          setIncomingRequest(null);
+        } else {
+          const patientWallet = String(session.patient_wallet ?? "");
+          let patientAlias = truncateWallet(patientWallet);
 
-          if (!isCancelled && !patientLookup.error && patientLookup.data?.username) {
-            patientAlias = patientLookup.data.username;
+          if (patientWallet) {
+            const patientLookup = await supabase
+              .from("patients")
+              .select("username")
+              .ilike("wallet_address", patientWallet)
+              .maybeSingle();
+
+            if (
+              !isCancelled &&
+              !patientLookup.error &&
+              patientLookup.data?.username
+            ) {
+              patientAlias = patientLookup.data.username;
+            }
+          }
+
+          if (!isCancelled) {
+            const status = normalizeSessionStatus(session.status);
+            setIncomingRequest({
+              id: String(session.id),
+              patientWallet,
+              patientAlias,
+              amountEth: Number(
+                session.session_fee_eth ??
+                  session.escrow_amount ??
+                  session.amount_eth ??
+                  SESSION_FEE_ETH,
+              ),
+              status: isProviderQueueSessionStatus(status) ? status : "requested",
+              sessionMode: normalizeSessionMode(session.session_mode),
+              intakeSummary: `Patient requested a secure ${formatSessionMode(
+                normalizeSessionMode(session.session_mode),
+              ).toLowerCase()} session. Open the live session flow to review further context.`,
+            });
           }
         }
-
-        if (!isCancelled) {
-          setIncomingRequest({
-            id: String(session.id),
-            patientWallet: String(session.patient_wallet ?? ""),
-            patientAlias,
-            amountEth: Number(session.amount_eth ?? 0.005),
-            intakeSummary:
-              session.intake_summary ??
-              "Patient shared an encrypted intake note. Open the chat to review further context.",
-          });
-        }
-      } else {
-        setIncomingRequest(null);
       }
 
       if (pendingResult.error) {
         setDataError(pendingResult.error.message);
       } else {
         const total = (pendingResult.data ?? []).reduce((sum, session) => {
-          return sum + Number(session.amount_eth ?? 0);
+          return (
+            sum +
+            Number(
+              session.session_fee_eth ??
+                session.escrow_amount ??
+                session.amount_eth ??
+                0,
+            )
+          );
         }, 0);
         setPendingEscrowEth(total);
       }
@@ -259,11 +333,16 @@ export default function TherapistPortalPage() {
                 id: String(row.id),
                 patientAlias:
                   aliasMap.get(patientWallet) ?? truncateWallet(patientWallet),
-                amountEth: Number(row.amount_eth ?? 0),
-                txHash: String(row.tx_hash ?? "Pending settlement"),
-                endedAt: String(
-                  row.ended_at ??
-                    row.completed_at ??
+                amountEth: Number(
+                  row.session_fee_eth ?? row.escrow_amount ?? row.amount_eth ?? 0,
+                ),
+                txHash: String(
+                  row.complete_session_tx_hash ??
+                    row.last_synced_tx_hash ??
+                    "Pending settlement",
+                ),
+                completedAt: String(
+                  row.completed_at ??
                     row.updated_at ??
                     row.created_at ??
                     "",
@@ -283,7 +362,25 @@ export default function TherapistPortalPage() {
     return () => {
       isCancelled = true;
     };
-  }, [therapistWallet]);
+  }, [refreshNonce, therapistWallet]);
+
+  useEffect(() => {
+    const handleProviderRequestUpdated = () => {
+      setRefreshNonce((current) => current + 1);
+    };
+
+    window.addEventListener(
+      PROVIDER_REQUEST_UPDATED_EVENT,
+      handleProviderRequestUpdated,
+    );
+
+    return () => {
+      window.removeEventListener(
+        PROVIDER_REQUEST_UPDATED_EVENT,
+        handleProviderRequestUpdated,
+      );
+    };
+  }, []);
 
   useEffect(() => {
     if (!settingsMessage) {
@@ -323,9 +420,14 @@ export default function TherapistPortalPage() {
       return;
     }
 
+    const now = new Date().toISOString();
     const { error } = await supabase
       .from("sessions")
-      .update({ status: "declined" })
+      .update({
+        status: "rejected",
+        rejected_at: now,
+        settlement_status: "cancelled",
+      })
       .eq("id", incomingRequest.id);
 
     if (error) {
@@ -343,10 +445,18 @@ export default function TherapistPortalPage() {
 
     setIsConnecting(true);
     setDataError("");
+    const now = new Date();
 
     const { error } = await supabase
       .from("sessions")
-      .update({ status: "active" })
+      .update({
+        status: "accepted_awaiting_payment",
+        provider_accepted_at: now.toISOString(),
+        payment_due_at: new Date(
+          now.getTime() + PAYMENT_WINDOW_MS,
+        ).toISOString(),
+        settlement_status: "awaiting_patient_payment",
+      })
       .eq("id", incomingRequest.id);
 
     if (error) {
@@ -413,38 +523,48 @@ export default function TherapistPortalPage() {
               </p>
             </div>
 
-            <div className="liquid-glass-soft flex flex-col gap-4 rounded-[28px] p-4 sm:min-w-[24rem]">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <span
-                    className={`h-2.5 w-2.5 rounded-full ${
-                      isOnline
-                        ? "bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,0.85)]"
-                        : "bg-black/20 dark:bg-white/20"
-                    } ${isOnline ? "animate-pulse" : ""}`}
-                  />
-                  <div>
-                    <p className="text-sm font-medium text-[var(--text-primary)]">
-                      Status: {isOnline ? "Accepting Requests" : "Offline"}
-                    </p>
-                    <p className="text-xs text-[var(--text-muted)]">
-                      {isOnline
-                        ? "Secure queue is open for anonymous patients."
-                        : "New requests are paused while you are unavailable."}
-                    </p>
+            <div className="flex flex-col gap-4 sm:min-w-[24rem]">
+              <button
+                type="button"
+                onClick={() => router.push("/provider-lobby")}
+                className="button-secondary self-start rounded-full px-5 py-3 text-sm font-medium"
+              >
+                Back to Provider Lobby
+              </button>
+
+              <div className="liquid-glass-soft flex flex-col gap-4 rounded-[28px] p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <span
+                      className={`h-2.5 w-2.5 rounded-full ${
+                        isOnline
+                          ? "bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,0.85)]"
+                          : "bg-black/20 dark:bg-white/20"
+                      } ${isOnline ? "animate-pulse" : ""}`}
+                    />
+                    <div>
+                      <p className="text-sm font-medium text-[var(--text-primary)]">
+                        Status: {isOnline ? "Accepting Requests" : "Offline"}
+                      </p>
+                      <p className="text-xs text-[var(--text-muted)]">
+                        {isOnline
+                          ? "Secure queue is open for anonymous patients."
+                          : "New requests are paused while you are unavailable."}
+                      </p>
+                    </div>
                   </div>
+                  <StatusBadge
+                    label={isOnline ? "Live Queue" : "Paused"}
+                    tone={isOnline ? "success" : "neutral"}
+                  />
                 </div>
-                <StatusBadge
-                  label={isOnline ? "Live Queue" : "Paused"}
-                  tone={isOnline ? "success" : "neutral"}
+
+                <LiquidToggle
+                  checked={isOnline}
+                  onChange={updateOnlineStatus}
+                  label="Provider online status"
                 />
               </div>
-
-              <LiquidToggle
-                checked={isOnline}
-                onChange={updateOnlineStatus}
-                label="Provider online status"
-              />
             </div>
           </div>
         </section>
@@ -579,7 +699,10 @@ export default function TherapistPortalPage() {
                       {truncateWallet(incomingRequest.patientWallet)}
                     </p>
                   </div>
-                  <StatusBadge label="Requested" tone="warning" />
+                  <StatusBadge
+                    label={formatProviderQueueStatusLabel(incomingRequest.status)}
+                    tone={formatProviderQueueStatusTone(incomingRequest.status)}
+                  />
                 </div>
 
                 <div className="mt-6 rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-4">
@@ -589,6 +712,25 @@ export default function TherapistPortalPage() {
                   <p className="mt-2 text-lg font-semibold text-emerald-600 dark:text-emerald-300">
                     {formatEth(incomingRequest.amountEth)} Locked in Contract
                   </p>
+                </div>
+
+                <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.18em] text-[var(--text-faint)]">
+                      Session Mode
+                    </p>
+                    <p className="mt-3 text-sm leading-7 text-[var(--text-muted)]">
+                      {formatSessionMode(incomingRequest.sessionMode)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.18em] text-[var(--text-faint)]">
+                      Queue Status
+                    </p>
+                    <p className="mt-3 text-sm leading-7 text-[var(--text-muted)]">
+                      {formatProviderQueueStatusLabel(incomingRequest.status)}
+                    </p>
+                  </div>
                 </div>
 
                 <div className="mt-5">
@@ -688,7 +830,7 @@ export default function TherapistPortalPage() {
                           {session.patientAlias}
                         </p>
                         <p className="mt-1 text-sm text-[var(--text-muted)]">
-                          {formatSessionDate(session.endedAt)}
+                          {formatSessionDate(session.completedAt)}
                         </p>
                       </div>
                       <StatusBadge label="Completed" tone="success" />
