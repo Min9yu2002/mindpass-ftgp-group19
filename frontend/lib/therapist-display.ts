@@ -5,10 +5,25 @@ type TherapistDisplaySource = {
   clinical_specialty?: string | null;
 };
 
+function pickDisplayValue(
+  ...values: Array<string | null | undefined>
+) {
+  for (const value of values) {
+    const normalized = typeof value === "string" ? value.trim() : "";
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return "";
+}
+
 export function getTherapistDisplayName(therapist: TherapistDisplaySource) {
   return (
-    String(
-      therapist.full_name ?? therapist.legal_name ?? "Anonymous Provider",
+    pickDisplayValue(
+      therapist.full_name,
+      therapist.legal_name,
+      "Anonymous Provider",
     ) || "Anonymous Provider"
   );
 }
@@ -17,10 +32,10 @@ export function getTherapistDisplaySpecialty(
   therapist: TherapistDisplaySource,
 ) {
   return (
-    String(
-      therapist.specialty ??
-        therapist.clinical_specialty ??
-        "General Specialist",
+    pickDisplayValue(
+      therapist.specialty,
+      therapist.clinical_specialty,
+      "General Specialist",
     ) || "General Specialist"
   );
 }

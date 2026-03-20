@@ -33,6 +33,38 @@ export default function TherapistLoginPage() {
     }
 
     const normalizedAddress = address.toLowerCase();
+    if (typeof window !== "undefined") {
+      const activeSession =
+        window.localStorage.getItem("mindpass-active-session") ?? "";
+      const patientProfile = window.localStorage.getItem("mindpass-patient-profile");
+      const therapistProfile = window.localStorage.getItem(
+        "mindpass-therapist-profile",
+      );
+
+      if (activeSession === "patient" && patientProfile) {
+        return;
+      }
+
+      if (activeSession === "therapist" && therapistProfile) {
+        try {
+          const parsedProfile = JSON.parse(therapistProfile) as {
+            walletAddress?: string;
+          };
+          const storedWallet = String(parsedProfile.walletAddress ?? "").trim();
+
+          if (
+            storedWallet &&
+            storedWallet.toLowerCase() === normalizedAddress
+          ) {
+            router.replace("/provider-lobby");
+            return;
+          }
+        } catch {
+          // Ignore invalid stored profile and continue explicit verification.
+        }
+      }
+    }
+
     if (lastHandledAddressRef.current === normalizedAddress) {
       return;
     }
