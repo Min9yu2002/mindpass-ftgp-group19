@@ -1,8 +1,6 @@
 # MindPass
 
-MindPass is an FTGP group project focused on building a privacy-first mental health support DApp prototype.
-
-The project explores how Web3 infrastructure can be used to support identity-aware access control, protected therapist–patient interactions, and hybrid on-chain/off-chain data management for sensitive counselling-related workflows.
+MindPass is a privacy-first mental health support MVP built as an FTGP group project. The current product combines wallet-based identity, patient and therapist role-specific portals, subsidy-aware booking, and a protected provider request workflow.
 
 ## Team
 - Mingyu Wang
@@ -10,85 +8,177 @@ The project explores how Web3 infrastructure can be used to support identity-awa
 - Haizhi Jiang
 - Haoyuan Wu
 
-## Project Summary
-MindPass is a privacy-preserving DApp prototype for mental health support, therapist access control, and protected session workflows.
-
-Sensitive counselling-related data is designed to remain off-chain in encrypted form, while blockchain components are used for proof, wallet-based identity, escrow-related logic, and permission tracking.
-
 ## Current MVP Scope
-The current MVP focuses on the following areas:
-- patient entry through the patient portal
-- therapist entry through the therapist portal
-- role-based browser session handling
-- protected routing for patient and therapist pages
-- therapist directory browsing on the patient side
-- support code redemption and subsidy balance handling
-- therapist verification and provider lobby flow
-- hybrid off-chain / on-chain architecture for sensitive data and payment logic
+The current frontend MVP focuses on:
+- patient onboarding and wallet-based vault access
+- therapist wallet verification and provider lobby access
+- strict single-role browser sessions using `mindpass-active-session`
+- protected patient and therapist route guards
+- therapist directory browsing on the landing page, dashboard, and directory page
+- subsidy-aware patient booking requests
+- provider request review with accept / reject workflow
+- provider wait queue handling with estimated ready time
+- no-show / mutual_unstarted terminal outcome handling
+- subsidy and mixed-funding refund accounting
+- outcome notice acknowledgement and support-request flow
+- Supabase-backed profile, booking, and audit log integration
+
+The MVP does not yet implement:
+- real on-chain escrow settlement
+- production-grade chat / XMTP workflow completion
+- advanced scheduling or therapist matching logic
+- automated wallet funding settlement after booking
+- full healthcare-grade compliance and record lifecycle controls
 
 ## Authentication and Session Model
-MindPass currently follows a single active browser session model.
+MindPass currently uses a strict single-role browser session model:
+- one wallet may exist in both `patients` and `therapists` in the database
+- the browser may only hold one active role at a time
+- the active role is determined only by the portal the user successfully logged in through
 
-A wallet may exist in both the `patients` and `therapists` tables in the database, but the browser only allows one active role at a time.
+The active session is stored in local storage:
+- `mindpass-active-session`
+- `mindpass-patient-profile`
+- `mindpass-therapist-profile`
+- `mindpass-xmtp-connected`
 
-The active role is determined by the portal the user successfully logged in through:
-- `/auth` establishes a patient session
-- `/therapist-login` establishes a therapist session
-
-The frontend currently supports these states:
+The frontend session states are:
 - `guest`
 - `unscoped`
 - `patient`
 - `therapist`
 
-Navigation and route guards are rendered based on the active session rather than database-role precedence.
+See [docs/auth-session-flow.md](docs/auth-session-flow.md) for the detailed state model and route guard behaviour.
 
-## What Works Now
-The following features are currently working:
-- patient login and dashboard entry
-- therapist login and provider lobby entry
-- role-aware navbar rendering
-- protected routes for patient and therapist pages
-- therapist listing fetch on the patient dashboard
-- therapist name fallback:
-  - `full_name || legal_name || "Anonymous Provider"`
-- therapist specialty fallback:
-  - `specialty || clinical_specialty || "General Specialist"`
-- explicit session cleanup on sign out
-- therapist authentication audit logging
-- support code validation and subsidy balance handling
+## Patient Login Flow
+Patient access is handled through `/auth`.
+
+`Initialize Vault`:
+- patient connects wallet
+- optional government support code can be redeemed
+- frontend writes / upserts the patient row in Supabase first
+- only after successful DB write does the browser store `mindpass-patient-profile`
+- active session is set to `patient`
+- user is routed to `/dashboard`
+
+`Quick Access`:
+- patient connects the same wallet
+- frontend checks Supabase for an existing patient row using case-insensitive wallet matching
+- if found, local storage is refreshed, active session is set to `patient`, and the user is routed to `/dashboard`
+- if not found, the user is told to initialize a vault first
+
+## Therapist Login Flow
+Therapist access is handled through `/therapist-login`.
+
+Current behaviour:
+- therapist connects wallet
+- frontend verifies the wallet against the `therapists` table using case-insensitive wallet matching
+- if found, browser stores `mindpass-therapist-profile`
+- active session is set to `therapist`
+- therapist login is recorded in `therapist_auth_logs`
+- user is routed to `/provider-lobby`
+- if no therapist row exists, the user is routed to therapist onboarding
+
+## Patient and Provider Surfaces
+`/dashboard` currently supports:
+- patient vault overview
+- wallet and subsidy balance display
+- verified online therapist listing
+- subsidy-aware booking requests
+- patient activity display
+- wait queue visibility and leave-queue flow
+- terminal outcome notices and acknowledgement handling
+
+`/provider-lobby` currently supports:
+- therapist status toggle
+- supported session mode toggle
+- incoming session requests from `sessions`
+- realtime popup for new requests
+- accept / reject actions that update session status
+- provider wait-queue-aware request handling
+- terminal outcome notices and acknowledgement handling
+- earnings summary and recent completed session history
+
+## Supabase Tables Used by the Frontend
+The frontend currently reads from or writes to:
+- `patients`
+- `therapists`
+- `sessions`
+- `redeem_codes`
+- `therapist_auth_logs`
+- `activities`
+
+See [docs/supabase-schema-notes.md](docs/supabase-schema-notes.md) for the frontend-facing schema notes and table purposes.
 
 ## Repository Structure
-- `docs/` — project documents and planning notes
-- `slides/` — presentation drafts and slide materials
-- `contracts/` — smart contract files and deployment notes
-- `frontend/` — website / DApp frontend files
-- `meeting-notes/` — meeting records and task allocations
+- `frontend/` — Next.js frontend and UI logic
+- `contracts/` — smart contract files and related config
+- `docs/` — project documentation
+- `meeting-notes/` — planning and meeting notes
+- `slides/` — presentation material
 
-## Latest Update
-This update focused on stabilising the initial login system and role-based session flow.
+## Manual QA Checklist
+Use this checklist after auth/session or dashboard/provider changes.
 
-Key improvements include:
-- initial patient and therapist login flow
-- active-session-based browser role handling
-- dashboard and provider lobby route protection
-- therapist directory fetch fixes
-- therapist display fallback for inconsistent database fields
-- support code redemption and ghost-profile self-healing improvements
+### Auth and Session
+- open the app with no wallet connected and confirm the navbar shows only `Therapist Portal` and `Login / Join`
+- connect a wallet without logging in through either portal and confirm the navbar shows only the wallet pill and `Sign Out`
+- initialize a patient vault and confirm `mindpass-active-session` becomes `patient`
+- log in as a therapist and confirm `mindpass-active-session` becomes `therapist`
+- sign out and confirm all MindPass session keys are removed from local storage
+- open a second tab, sign out in the first tab, and confirm the second tab syncs out of the session
 
-## Next Steps
-Planned next steps include:
-- deduplicating therapist authentication logs
-- implementing booking and session records
-- connecting booking flow to escrow / payment logic
-- integrating XMTP / WebRTC communication
-- refining therapist availability and session status workflows
-- polishing navbar and session-related UI behaviour
+### Patient Dashboard
+- verify patient route guard redirects unauthenticated / unscoped users to `/auth`
+- verify therapist active sessions are blocked from the patient dashboard
+- confirm therapist cards render a valid provider name and specialty even for older records using `legal_name` / `clinical_specialty`
+- click `Book & Lock 0.005 ETH` and confirm a `sessions` row is created with the expected funding fields
 
-## Notes
-This repository currently reflects an early but stabilised MVP stage.
+### Provider Lobby
+- verify provider route guard redirects unauthenticated / unscoped users to `/therapist-login`
+- verify patient active sessions are blocked from the provider lobby
+- confirm realtime popup appears for a new session request targeting the logged-in therapist wallet
+- accept a request and confirm the `sessions.status` changes according to funding logic
+- reject a request and confirm the row is removed from the active incoming list
 
-The authentication and role-based session flow has been implemented at an initial level, while booking, communication, and end-to-end session execution are still under active development.
+### No-show / Outcome / Refund Accounting
+- verify `mutual_unstarted` settles with the expected refund and platform fee
+- verify `therapist_no_show` refunds the patient correctly
+- verify `patient_no_show` applies therapist compensation correctly
+- verify subsidy-only refund accounting is written correctly
+- verify mixed-funding refund breakdown fields are written correctly
+- verify acknowledged outcome modals do not reopen repeatedly on refresh
+- verify acknowledged outcome banners disappear correctly after refresh
 
-**Author:** Mingyu Wang  
-**Last updated:** 2026-03-17
+## Related Docs
+- [docs/auth-session-flow.md](docs/auth-session-flow.md)
+- [docs/supabase-schema-notes.md](docs/supabase-schema-notes.md)
+- [docs/mvp-scope.md](docs/mvp-scope.md)
+
+## Implementation & Testing Progress
+
+### Implemented
+- Session lifecycle and no-show logic now use first valid in-session interaction as the arrival signal; opening chat alone no longer writes arrival, and funded sessions now resolve against a no-show deadline with terminal outcomes `mutual_unstarted`, `therapist_no_show`, and `patient_no_show`.
+- Subsidy accounting now deducts at funding time and aligns terminal refund handling with outcome policy. The `mutual_unstarted` and `patient_no_show` subsidy refund paths were fixed, `therapist_no_show` was verified, and `subsidy_refunded_eth` now stays consistent with patient subsidy balance updates.
+- Mixed-funding accounting now records subsidy-funded and wallet-funded refund components separately. `patient_refund_eth`, `vault_refund_eth`, and `total_refund_eth` were corrected to reflect component-level refund breakdowns.
+- Provider wait queue support was added with `queued_waiting_for_provider`, queue position and estimated ready time fields, patient leave-queue handling, and queue promotion when a therapist becomes available.
+- Terminal outcome UX now includes a role-aware outcome modal, a DB-backed `support_requests` Contact Us flow, modal acknowledgement persistence, banner acknowledgement suppression, and viewer-role-specific acknowledgement behavior.
+- Therapist reliability tracking now increments `no_show_flag_count` for `therapist_no_show` and `mutual_unstarted_flag_count` for `mutual_unstarted`.
+- The wallet badge hover popover was restored, moved into a true floating portal layer, and updated to use real app state where available instead of placeholder-only status text.
+
+### Verified
+- `subsidy + mutual_unstarted`
+- `subsidy + therapist_no_show`
+- `subsidy + patient_no_show`
+- `mixed + mutual_unstarted`
+- `mixed + therapist_no_show`
+- `mixed + patient_no_show`
+- Outcome modal acknowledgement no longer reopens repeatedly on refresh.
+- Acknowledged outcome banner disappears correctly after refresh.
+
+### Next Steps
+- Connect the real escrow contract deployment wiring and complete the on-chain settlement / sync path so the current DB-first accounting aligns with live contract execution.
+
+Recent work log by M1n9yu
+
+**Last updated:** 2026-03-20
