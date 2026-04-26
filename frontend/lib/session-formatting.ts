@@ -1,7 +1,7 @@
 import type {
   ProviderQueueSessionStatus,
   SessionMode,
-} from "./session-status.ts";
+} from "./session-status";
 
 export type SessionTone = "warning" | "success" | "neutral";
 

@@ -1,21 +1,50 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import {
+  readContract,
+  simulateContract,
+  waitForTransactionReceipt,
+  writeContract,
+} from "@wagmi/core";
 import { useRouter } from "next/navigation";
+import { formatEther } from "viem";
+import { useAccount, useChainId, useConfig } from "wagmi";
 import GlassCard from "../../components/GlassCard";
 import { PROVIDER_REQUEST_UPDATED_EVENT } from "../../components/GlobalProviderIncomingRequestCard";
 import LiquidToggle from "../../components/LiquidToggle";
 import SectionHeading from "../../components/SectionHeading";
 import StatusBadge from "../../components/StatusBadge";
+import { SESSION_FEE_ETH } from "../../lib/booking";
 import {
-  PAYMENT_WINDOW_MS,
-  SESSION_FEE_ETH,
-} from "../../lib/booking";
+  buildBookingAcceptedPatch,
+  buildBookingRejectedPatch,
+  buildWithdrawalPatch,
+  compactSessionSyncPatch,
+} from "../../lib/onchain-session-mapping";
 import {
   formatProviderQueueStatusLabel,
   formatProviderQueueStatusTone,
   formatSessionMode,
 } from "../../lib/session-formatting";
+import {
+  findMindPassEscrowEvent,
+  type HexAddress,
+  MINDPASS_ESCROW_ABI,
+  MINDPASS_ESCROW_CHAIN_ID,
+  MINDPASS_ESCROW_DEPLOYMENT,
+  MINDPASS_ESCROW_STATUS,
+  normalizeMindPassEscrowSession,
+  prepareAcceptBooking,
+  prepareRejectBooking,
+  prepareWithdraw,
+} from "../../lib/mindpassEscrow";
+import {
+  logEscrowDebug,
+  logMirrorSync,
+  logMirrorSyncError,
+  logReceiptDecode,
+} from "../../lib/escrow-debug";
 import {
   isProviderQueueSessionStatus,
   normalizeSessionMode,
@@ -25,6 +54,11 @@ import {
   type SessionMode,
 } from "../../lib/session-status";
 import { supabase } from "../../lib/supabase";
+import {
+  getOutstandingTherapistPayoutEstimateEth,
+  isRecordedTherapistPayoutRow,
+  type TherapistPayoutSessionStatus,
+} from "../../lib/therapist-earnings";
 
 type SupportedMode = "Voice" | "Text";
 
@@ -36,6 +70,7 @@ type TherapistProfile = {
 
 type IncomingRequest = {
   id: string;
+  onchainSessionId: string | null;
   patientWallet: string;
   patientAlias: string;
   amountEth: number;
@@ -44,18 +79,32 @@ type IncomingRequest = {
   intakeSummary: string;
 };
 
-type CompletedSession = {
+type RecordedPayoutSession = {
   id: string;
   patientAlias: string;
-  amountEth: number;
+  therapistPayoutEth: number;
   txHash: string;
   completedAt: string;
+  status: TherapistPayoutSessionStatus;
 };
+
+const IS_DEV = process.env.NODE_ENV !== "production";
+
+function logAcceptMirrorRecheck(
+  label: string,
+  payload: Record<string, unknown>,
+) {
+  if (!IS_DEV) {
+    return;
+  }
+
+  console.debug("[accept-mirror-recheck]", label, payload);
+}
 
 const LEAD_THERAPIST_WALLET =
   "0x8Ec7F2F349111B2443A6C68691344B7d53d5B2cD".toLowerCase();
 const PORTAL_QUEUE_SELECT =
-  "id, patient_wallet, therapist_wallet, status, created_at, updated_at, session_mode, session_fee_eth, escrow_amount, amount_eth";
+  "id, onchain_session_id, patient_wallet, therapist_wallet, status, created_at, updated_at, session_mode, session_fee_eth, escrow_amount, amount_eth";
 const INCOMING_QUEUE_PRIORITY: ProviderQueueSessionStatus[] = [
   "requested",
   "accepted_awaiting_payment",
@@ -139,6 +188,9 @@ function resolveIncomingQueueSession(
 
 export default function TherapistPortalPage() {
   const router = useRouter();
+  const { address, isConnected, status: accountStatus } = useAccount();
+  const chainId = useChainId();
+  const wagmiConfig = useConfig();
   const therapistWallet = useMemo(() => resolveTherapistWallet(), []);
   const [profile, setProfile] = useState<TherapistProfile>({
     walletAddress: therapistWallet,
@@ -149,16 +201,132 @@ export default function TherapistPortalPage() {
   const [incomingRequest, setIncomingRequest] = useState<IncomingRequest | null>(
     null,
   );
-  const [completedSessions, setCompletedSessions] = useState<CompletedSession[]>([]);
+  const [recordedPayoutSessions, setRecordedPayoutSessions] = useState<
+    RecordedPayoutSession[]
+  >([]);
   const [pendingEscrowEth, setPendingEscrowEth] = useState(0);
+  const [recordedOutstandingPayoutEth, setRecordedOutstandingPayoutEth] = useState(0);
+  const [claimableBalanceWei, setClaimableBalanceWei] = useState<bigint | null>(null);
+  const [isLoadingClaimableBalance, setIsLoadingClaimableBalance] = useState(true);
+  const [claimableBalanceError, setClaimableBalanceError] = useState("");
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [isClaimingFunds, setIsClaimingFunds] = useState(false);
   const [isLoadingModes, setIsLoadingModes] = useState(true);
   const [isSavingModes, setIsSavingModes] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [settingsMessage, setSettingsMessage] = useState("");
+
+  const readPortalChainSession = async (onchainSessionId: string) => {
+    const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+    if (!contractAddress) {
+      return null;
+    }
+
+    return normalizeMindPassEscrowSession(
+      (await readContract(wagmiConfig, {
+        address: contractAddress,
+        abi: MINDPASS_ESCROW_ABI,
+        functionName: "sessions",
+        args: [BigInt(onchainSessionId)],
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+      })) as readonly unknown[],
+    );
+  };
+
+  const selfHealRequestedPortalRow = async (
+    row: Record<string, unknown>,
+    source: "therapist-portal",
+  ) => {
+    const dbStatus = normalizeSessionStatus(row.status);
+    const onchainSessionId =
+      row.onchain_session_id === null || row.onchain_session_id === undefined
+        ? null
+        : String(row.onchain_session_id);
+
+    if (dbStatus !== "requested" || !onchainSessionId || !supabase) {
+      return row;
+    }
+
+    logAcceptMirrorRecheck("requested_card_chain_recheck_started", {
+      sessionId: String(row.id ?? ""),
+      onchainSessionId,
+      dbStatus,
+      chainStatus: null,
+      txHash: null,
+      source,
+      recoveryApplied: false,
+    });
+
+    const chainSession = await readPortalChainSession(onchainSessionId);
+    logAcceptMirrorRecheck("requested_card_chain_recheck_result", {
+      sessionId: String(row.id ?? ""),
+      onchainSessionId,
+      dbStatus,
+      chainStatus: chainSession?.status ?? null,
+      txHash: null,
+      source,
+      recoveryApplied: false,
+    });
+
+    if (
+      !chainSession ||
+      chainSession.status !== MINDPASS_ESCROW_STATUS.AcceptedAwaitingPayment
+    ) {
+      return row;
+    }
+
+    const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+    if (!contractAddress) {
+      return row;
+    }
+
+    const { data, error } = await supabase
+      .from("sessions")
+      .update(
+        buildBookingAcceptedPatch({
+          acceptedAt: chainSession.providerAcceptedAt,
+          paymentDueAt: chainSession.paymentDueAt,
+          contractAddress,
+          chainId: MINDPASS_ESCROW_CHAIN_ID,
+        }),
+      )
+      .eq("id", String(row.id ?? ""))
+      .eq("onchain_session_id", onchainSessionId)
+      .select(PORTAL_QUEUE_SELECT)
+      .maybeSingle();
+
+    if (error || !data) {
+      return row;
+    }
+
+    logAcceptMirrorRecheck("requested_row_self_healed", {
+      sessionId: String(row.id ?? ""),
+      onchainSessionId,
+      dbStatus,
+      chainStatus: chainSession.status,
+      txHash: null,
+      source,
+      recoveryApplied: true,
+    });
+
+    return data as Record<string, unknown>;
+  };
   const [dataError, setDataError] = useState("");
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const claimableBalanceEth =
+    claimableBalanceWei === null ? 0 : Number(formatEther(claimableBalanceWei));
+  const hasClaimableBalance =
+    claimableBalanceWei !== null && claimableBalanceWei > 0n;
+  const claimFundsButtonLabel = isClaimingFunds
+    ? "Claiming..."
+    : isLoadingClaimableBalance
+      ? "Loading balance..."
+      : claimableBalanceError
+        ? "Balance unavailable"
+        : hasClaimableBalance
+          ? "Claim Funds"
+          : "No claimable funds";
 
   useEffect(() => {
     let isCancelled = false;
@@ -196,22 +364,22 @@ export default function TherapistPortalPage() {
         .ilike("therapist_wallet", therapistWallet)
         .in("status", ["funded", "in_session"]);
 
-      const completedQuery = supabase
+      const recordedPayoutQuery = supabase
         .from("sessions")
         .select(
-          "id, patient_wallet, session_fee_eth, escrow_amount, amount_eth, complete_session_tx_hash, last_synced_tx_hash, updated_at, completed_at, created_at",
+          "id, patient_wallet, status, therapist_payout_eth, therapist_withdrawal_tx_hash, complete_session_tx_hash, resolve_no_show_tx_hash, last_synced_tx_hash, updated_at, completed_at, created_at",
         )
         .ilike("therapist_wallet", therapistWallet)
-        .eq("status", "completed")
+        .in("status", ["completed", "patient_no_show"])
         .order("updated_at", { ascending: false })
-        .limit(3);
+        .limit(6);
 
-      const [therapistResult, requestedResult, pendingResult, completedResult] =
+      const [therapistResult, requestedResult, pendingResult, recordedPayoutResult] =
         await Promise.all([
           therapistQuery,
           requestedQuery,
           pendingQuery,
-          completedQuery,
+          recordedPayoutQuery,
         ]);
 
       if (isCancelled) {
@@ -236,10 +404,13 @@ export default function TherapistPortalPage() {
       if (requestedResult.error) {
         setDataError(requestedResult.error.message);
       } else {
-        const requestedRows = ((requestedResult.data ?? []) as Record<string, unknown>[])
-          .filter((session) =>
-            isProviderQueueSessionStatus(normalizeSessionStatus(session.status)),
-          );
+        const requestedRows = await Promise.all(
+          ((requestedResult.data ?? []) as Record<string, unknown>[])
+            .filter((session) =>
+              isProviderQueueSessionStatus(normalizeSessionStatus(session.status)),
+            )
+            .map((session) => selfHealRequestedPortalRow(session, "therapist-portal")),
+        );
         const session = resolveIncomingQueueSession(requestedRows);
 
         if (!session) {
@@ -264,10 +435,19 @@ export default function TherapistPortalPage() {
             }
           }
 
-          if (!isCancelled) {
-            const status = normalizeSessionStatus(session.status);
-            setIncomingRequest({
-              id: String(session.id),
+            if (!isCancelled) {
+              const status = normalizeSessionStatus(session.status);
+              if (status !== "requested") {
+                setIncomingRequest(null);
+                return;
+              }
+              setIncomingRequest({
+                id: String(session.id),
+                onchainSessionId:
+                session.onchain_session_id === null ||
+                session.onchain_session_id === undefined
+                  ? null
+                  : String(session.onchain_session_id),
               patientWallet,
               patientAlias,
               amountEth: Number(
@@ -303,10 +483,12 @@ export default function TherapistPortalPage() {
         setPendingEscrowEth(total);
       }
 
-      if (completedResult.error) {
-        setDataError(completedResult.error.message);
+      if (recordedPayoutResult.error) {
+        setDataError(recordedPayoutResult.error.message);
       } else {
-        const rows = completedResult.data ?? [];
+        const rows = (recordedPayoutResult.data ?? []).filter(
+          isRecordedTherapistPayoutRow,
+        );
         const patientWallets = rows
           .map((row) => row.patient_wallet as string | null)
           .filter(Boolean) as string[];
@@ -326,20 +508,24 @@ export default function TherapistPortalPage() {
         }
 
         if (!isCancelled) {
-          setCompletedSessions(
+          setRecordedOutstandingPayoutEth(
+            getOutstandingTherapistPayoutEstimateEth(rows),
+          );
+          setRecordedPayoutSessions(
             rows.map((row) => {
               const patientWallet = String(row.patient_wallet ?? "");
+              const status = row.status;
               return {
                 id: String(row.id),
                 patientAlias:
                   aliasMap.get(patientWallet) ?? truncateWallet(patientWallet),
-                amountEth: Number(
-                  row.session_fee_eth ?? row.escrow_amount ?? row.amount_eth ?? 0,
-                ),
+                therapistPayoutEth: Number(row.therapist_payout_eth ?? 0),
                 txHash: String(
-                  row.complete_session_tx_hash ??
+                  (status === "patient_no_show"
+                    ? row.resolve_no_show_tx_hash
+                    : row.complete_session_tx_hash) ??
                     row.last_synced_tx_hash ??
-                    "Pending settlement",
+                    "Pending sync",
                 ),
                 completedAt: String(
                   row.completed_at ??
@@ -347,6 +533,7 @@ export default function TherapistPortalPage() {
                     row.created_at ??
                     "",
                 ),
+                status,
               };
             }),
           );
@@ -363,6 +550,62 @@ export default function TherapistPortalPage() {
       isCancelled = true;
     };
   }, [refreshNonce, therapistWallet]);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    const hydrateClaimableBalance = async () => {
+      const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+
+      if (!contractAddress) {
+        if (!isCancelled) {
+          setClaimableBalanceWei(null);
+          setClaimableBalanceError(
+            "The MindPass escrow contract is not configured in this app.",
+          );
+          setIsLoadingClaimableBalance(false);
+        }
+        return;
+      }
+
+      setIsLoadingClaimableBalance(true);
+      setClaimableBalanceError("");
+
+      try {
+        const balanceResult = await readContract(wagmiConfig, {
+          address: contractAddress,
+          abi: MINDPASS_ESCROW_ABI,
+          functionName: "claimableBalance",
+          args: [therapistWallet as HexAddress],
+          chainId: MINDPASS_ESCROW_CHAIN_ID,
+        });
+        const balance = BigInt(balanceResult as string | number | bigint);
+
+        if (!isCancelled) {
+          setClaimableBalanceWei(balance);
+        }
+      } catch (error) {
+        if (!isCancelled) {
+          setClaimableBalanceWei(null);
+          setClaimableBalanceError(
+            error instanceof Error
+              ? error.message
+              : "Unable to read the therapist claimable balance on-chain.",
+          );
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsLoadingClaimableBalance(false);
+        }
+      }
+    };
+
+    void hydrateClaimableBalance();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [refreshNonce, therapistWallet, wagmiConfig]);
 
   useEffect(() => {
     const handleProviderRequestUpdated = () => {
@@ -420,22 +663,141 @@ export default function TherapistPortalPage() {
       return;
     }
 
-    const now = new Date().toISOString();
-    const { error } = await supabase
-      .from("sessions")
-      .update({
-        status: "rejected",
-        rejected_at: now,
-        settlement_status: "cancelled",
-      })
-      .eq("id", incomingRequest.id);
+    try {
+      if (!address || !isConnected || accountStatus !== "connected") {
+        setDataError("Connect the therapist wallet before reviewing requests.");
+        return;
+      }
 
-    if (error) {
-      setDataError(error.message);
-      return;
+      if (address.toLowerCase() !== therapistWallet) {
+        setDataError("Connect the therapist wallet for this provider profile.");
+        return;
+      }
+
+      if (chainId !== MINDPASS_ESCROW_CHAIN_ID) {
+        setDataError("Switch to Sepolia before reviewing requests.");
+        return;
+      }
+
+      if (!incomingRequest.onchainSessionId) {
+        setDataError("This booking is missing an on-chain session id.");
+        return;
+      }
+
+      const chainSessionBeforeReject = await readPortalChainSession(
+        incomingRequest.onchainSessionId,
+      );
+      logAcceptMirrorRecheck("pre_reject_chain_recheck_result", {
+        sessionId: incomingRequest.id,
+        onchainSessionId: incomingRequest.onchainSessionId,
+        dbStatus: incomingRequest.status,
+        chainStatus: chainSessionBeforeReject?.status ?? null,
+        txHash: null,
+        source: "therapist-portal",
+        recoveryApplied: false,
+      });
+
+      if (
+        chainSessionBeforeReject &&
+        chainSessionBeforeReject.status !== MINDPASS_ESCROW_STATUS.Requested
+      ) {
+        await selfHealRequestedPortalRow(
+          {
+            id: incomingRequest.id,
+            onchain_session_id: incomingRequest.onchainSessionId,
+            status: incomingRequest.status,
+          },
+          "therapist-portal",
+        );
+        setDataError(
+          "This request has already moved forward on-chain. Refreshing session state.",
+        );
+        setIncomingRequest(null);
+        return;
+      }
+
+      const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+      if (!contractAddress) {
+        setDataError("The MindPass escrow contract is not configured in this app.");
+        return;
+      }
+
+      const request = prepareRejectBooking({
+        address: contractAddress,
+        sessionId: BigInt(incomingRequest.onchainSessionId),
+      });
+      logEscrowDebug("submitting therapist portal rejection", {
+        source: "therapist-portal",
+        sessionId: incomingRequest.id,
+        onchainSessionId: incomingRequest.onchainSessionId,
+        functionName: request.functionName,
+      });
+      const { request: simulatedRequest } = await simulateContract(wagmiConfig, {
+        address: request.address,
+        abi: request.abi,
+        functionName: "rejectBooking",
+        args: request.args,
+        chainId: request.chainId,
+        account: address,
+      });
+      const hash = await writeContract(wagmiConfig, {
+        ...simulatedRequest,
+        address: request.address,
+        abi: request.abi,
+        functionName: "rejectBooking",
+        args: request.args,
+        chainId: request.chainId,
+      });
+      const receipt = await waitForTransactionReceipt(wagmiConfig, {
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+        hash,
+      });
+      logReceiptDecode({
+        context: "therapist portal rejection receipt decoded",
+        txHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+        logs: receipt.logs,
+      });
+
+      const { error } = await supabase
+        .from("sessions")
+        .update(
+          buildBookingRejectedPatch({
+            contractAddress,
+            chainId: MINDPASS_ESCROW_CHAIN_ID,
+            txHash: receipt.transactionHash,
+            blockNumber: receipt.blockNumber,
+          }),
+        )
+        .eq("id", incomingRequest.id)
+        .eq("onchain_session_id", incomingRequest.onchainSessionId);
+
+      if (error) {
+        logMirrorSyncError("therapist portal rejection mirror sync failed", {
+          sessionId: incomingRequest.id,
+          onchainSessionId: incomingRequest.onchainSessionId,
+          txHash: receipt.transactionHash,
+          message: error.message,
+        });
+        setDataError(
+          "The on-chain decline succeeded, but the session record could not be synced. Please refresh.",
+        );
+        return;
+      }
+
+      logMirrorSync("therapist portal rejection mirror sync complete", {
+        sessionId: incomingRequest.id,
+        onchainSessionId: incomingRequest.onchainSessionId,
+        txHash: receipt.transactionHash,
+      });
+      setIncomingRequest(null);
+    } catch (error) {
+      setDataError(
+        error instanceof Error
+          ? error.message
+          : "Unable to decline this request right now.",
+      );
     }
-
-    setIncomingRequest(null);
   };
 
   const handleAccept = async () => {
@@ -445,29 +807,218 @@ export default function TherapistPortalPage() {
 
     setIsConnecting(true);
     setDataError("");
-    const now = new Date();
+    try {
+      if (!address || !isConnected || accountStatus !== "connected") {
+        setDataError("Connect the therapist wallet before reviewing requests.");
+        setIsConnecting(false);
+        return;
+      }
 
-    const { error } = await supabase
-      .from("sessions")
-      .update({
-        status: "accepted_awaiting_payment",
-        provider_accepted_at: now.toISOString(),
-        payment_due_at: new Date(
-          now.getTime() + PAYMENT_WINDOW_MS,
-        ).toISOString(),
-        settlement_status: "awaiting_patient_payment",
-      })
-      .eq("id", incomingRequest.id);
+      if (address.toLowerCase() !== therapistWallet) {
+        setDataError("Connect the therapist wallet for this provider profile.");
+        setIsConnecting(false);
+        return;
+      }
 
-    if (error) {
-      setDataError(error.message);
+      if (chainId !== MINDPASS_ESCROW_CHAIN_ID) {
+        setDataError("Switch to Sepolia before reviewing requests.");
+        setIsConnecting(false);
+        return;
+      }
+
+      if (!incomingRequest.onchainSessionId) {
+        setDataError("This booking is missing an on-chain session id.");
+        setIsConnecting(false);
+        return;
+      }
+
+      const chainSessionBeforeAccept = await readPortalChainSession(
+        incomingRequest.onchainSessionId,
+      );
+      logAcceptMirrorRecheck("pre_accept_chain_recheck_result", {
+        sessionId: incomingRequest.id,
+        onchainSessionId: incomingRequest.onchainSessionId,
+        dbStatus: incomingRequest.status,
+        chainStatus: chainSessionBeforeAccept?.status ?? null,
+        txHash: null,
+        source: "therapist-portal",
+        recoveryApplied: false,
+      });
+
+      if (
+        chainSessionBeforeAccept &&
+        chainSessionBeforeAccept.status !== MINDPASS_ESCROW_STATUS.Requested
+      ) {
+        await selfHealRequestedPortalRow(
+          {
+            id: incomingRequest.id,
+            onchain_session_id: incomingRequest.onchainSessionId,
+            status: incomingRequest.status,
+          },
+          "therapist-portal",
+        );
+        setDataError(
+          "This request has already moved forward on-chain. Refreshing session state.",
+        );
+        setIncomingRequest(null);
+        setIsConnecting(false);
+        return;
+      }
+
+      const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+      if (!contractAddress) {
+        setDataError("The MindPass escrow contract is not configured in this app.");
+        setIsConnecting(false);
+        return;
+      }
+
+      const request = prepareAcceptBooking({
+        address: contractAddress,
+        sessionId: BigInt(incomingRequest.onchainSessionId),
+      });
+      const onchainSessionIdValue = BigInt(incomingRequest.onchainSessionId);
+      logEscrowDebug("submitting therapist portal acceptance", {
+        source: "therapist-portal",
+        sessionId: incomingRequest.id,
+        onchainSessionId: incomingRequest.onchainSessionId,
+        functionName: request.functionName,
+      });
+      const { request: simulatedRequest } = await simulateContract(wagmiConfig, {
+        address: request.address,
+        abi: request.abi,
+        functionName: "acceptBooking",
+        args: request.args,
+        chainId: request.chainId,
+        account: address,
+      });
+      const hash = await writeContract(wagmiConfig, {
+        ...simulatedRequest,
+        address: request.address,
+        abi: request.abi,
+        functionName: "acceptBooking",
+        args: request.args,
+        chainId: request.chainId,
+      });
+      const receipt = await waitForTransactionReceipt(wagmiConfig, {
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+        hash,
+      });
+      logReceiptDecode({
+        context: "therapist portal acceptance receipt decoded",
+        txHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+        logs: receipt.logs,
+      });
+      const event = findMindPassEscrowEvent(receipt.logs, "BookingAccepted");
+      const recoverAcceptedPatchFromChain = async () => {
+        logAcceptMirrorRecheck("accept_receipt_recovery_started", {
+          sessionId: incomingRequest.id,
+          onchainSessionId: incomingRequest.onchainSessionId,
+          dbStatus: incomingRequest.status,
+          chainStatus: null,
+          txHash: receipt.transactionHash,
+          source: "therapist-portal",
+          recoveryApplied: false,
+        });
+        const chainSession = normalizeMindPassEscrowSession(
+          (await readContract(wagmiConfig, {
+            address: contractAddress,
+            abi: MINDPASS_ESCROW_ABI,
+            functionName: "sessions",
+            args: [onchainSessionIdValue],
+            chainId: MINDPASS_ESCROW_CHAIN_ID,
+          })) as readonly unknown[],
+        );
+
+        if (chainSession.status !== MINDPASS_ESCROW_STATUS.AcceptedAwaitingPayment) {
+          return null;
+        }
+
+        return buildBookingAcceptedPatch({
+          acceptedAt: chainSession.providerAcceptedAt,
+          paymentDueAt: chainSession.paymentDueAt,
+          contractAddress,
+          chainId: MINDPASS_ESCROW_CHAIN_ID,
+          txHash: receipt.transactionHash,
+          blockNumber: receipt.blockNumber,
+        });
+      };
+      const acceptedPatch =
+        event
+          ? buildBookingAcceptedPatch({
+              acceptedAt: event.args.providerAcceptedAt,
+              paymentDueAt: event.args.paymentDueAt,
+              contractAddress,
+              chainId: MINDPASS_ESCROW_CHAIN_ID,
+              txHash: receipt.transactionHash,
+              blockNumber: receipt.blockNumber,
+            })
+          : await recoverAcceptedPatchFromChain();
+
+      if (!acceptedPatch) {
+        throw new Error(
+          "Accept transaction succeeded, but the accepted session state could not be recovered for mirror sync.",
+        );
+      }
+
+      const { error } = await supabase
+        .from("sessions")
+        .update(acceptedPatch)
+        .eq("id", incomingRequest.id)
+        .eq("onchain_session_id", incomingRequest.onchainSessionId);
+
+      if (error) {
+        const recoveredPatch = await recoverAcceptedPatchFromChain();
+        const { error: recoveredError } = recoveredPatch
+          ? await supabase
+              .from("sessions")
+              .update(recoveredPatch)
+              .eq("id", incomingRequest.id)
+              .eq("onchain_session_id", incomingRequest.onchainSessionId)
+          : { error: error };
+
+        if (!recoveredError) {
+          logMirrorSync("therapist portal acceptance mirror sync complete", {
+            sessionId: incomingRequest.id,
+            onchainSessionId: incomingRequest.onchainSessionId,
+            txHash: receipt.transactionHash,
+          });
+          router.push(
+            `/chat?role=therapist&address=${encodeURIComponent(profile.walletAddress)}`,
+          );
+          return;
+        }
+
+        logMirrorSyncError("therapist portal acceptance mirror sync failed", {
+          sessionId: incomingRequest.id,
+          onchainSessionId: incomingRequest.onchainSessionId,
+          txHash: receipt.transactionHash,
+          message: recoveredError.message,
+        });
+        setDataError(
+          "The on-chain accept succeeded, but the session record could not be synced. Please refresh.",
+        );
+        setIsConnecting(false);
+        return;
+      }
+
+      logMirrorSync("therapist portal acceptance mirror sync complete", {
+        sessionId: incomingRequest.id,
+        onchainSessionId: incomingRequest.onchainSessionId,
+        txHash: receipt.transactionHash,
+      });
+      router.push(
+        `/chat?role=therapist&address=${encodeURIComponent(profile.walletAddress)}`,
+      );
+    } catch (error) {
+      setDataError(
+        error instanceof Error
+          ? error.message
+          : "Unable to accept this request right now.",
+      );
       setIsConnecting(false);
       return;
     }
-
-    router.push(
-      `/chat?role=therapist&address=${encodeURIComponent(profile.walletAddress)}`,
-    );
   };
 
   const handleModeToggle = async (mode: SupportedMode) => {
@@ -504,6 +1055,156 @@ export default function TherapistPortalPage() {
     }));
     setSettingsMessage("Session modes updated.");
     setIsSavingModes(false);
+  };
+
+  const handleClaimFunds = async () => {
+    if (isClaimingFunds) {
+      return;
+    }
+
+    setIsClaimingFunds(true);
+    setDataError("");
+    setSettingsMessage("");
+
+    try {
+      if (!address || !isConnected || accountStatus !== "connected") {
+        setDataError("Connect the therapist wallet before claiming funds.");
+        return;
+      }
+
+      if (address.toLowerCase() !== therapistWallet) {
+        setDataError("Connect the therapist wallet for this provider profile.");
+        return;
+      }
+
+      if (chainId !== MINDPASS_ESCROW_CHAIN_ID) {
+        setDataError("Switch to Sepolia before claiming funds.");
+        return;
+      }
+
+      if (isLoadingClaimableBalance) {
+        setDataError("Wait for the on-chain claimable balance to finish loading.");
+        return;
+      }
+
+      if (claimableBalanceError) {
+        setDataError("Unable to verify the on-chain claimable balance. Refresh and try again.");
+        return;
+      }
+
+      if (!hasClaimableBalance) {
+        setDataError("No claimable funds are currently available on-chain.");
+        return;
+      }
+
+      const client = supabase;
+      if (!client) {
+        setDataError("Supabase client is unavailable.");
+        return;
+      }
+
+      const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+      if (!contractAddress) {
+        setDataError("The MindPass escrow contract is not configured in this app.");
+        return;
+      }
+
+      const request = prepareWithdraw({ address: contractAddress });
+      logEscrowDebug("submitting withdrawal", {
+        source: "therapist-portal",
+        functionName: request.functionName,
+        walletAddress: therapistWallet,
+      });
+      const hash = await writeContract(wagmiConfig, {
+        address: request.address,
+        abi: request.abi,
+        functionName: "withdraw",
+        args: request.args,
+        chainId: request.chainId,
+      });
+
+      const receipt = await waitForTransactionReceipt(wagmiConfig, {
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+        hash,
+      });
+      logReceiptDecode({
+        context: "withdrawal receipt decoded",
+        txHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+        logs: receipt.logs,
+      });
+      const withdrawalEvent = findMindPassEscrowEvent(receipt.logs, "Withdrawal");
+
+      if (
+        withdrawalEvent &&
+        withdrawalEvent.args.account.toLowerCase() !== therapistWallet
+      ) {
+        logMirrorSyncError("therapist withdrawal receipt beneficiary mismatch", {
+          txHash: receipt.transactionHash,
+          expectedWallet: therapistWallet,
+          eventAccount: withdrawalEvent.args.account.toLowerCase(),
+        });
+        setDataError(
+          "The on-chain withdrawal succeeded, but the payout beneficiary could not be verified. Please refresh.",
+        );
+        return;
+      }
+
+      if (!withdrawalEvent) {
+        logEscrowDebug("Withdrawal event missing from therapist withdrawal receipt", {
+          txHash: receipt.transactionHash,
+          walletAddress: therapistWallet,
+        });
+      }
+
+      const { data: syncedRows, error: syncError } = await client
+        .from("sessions")
+        .update(
+          compactSessionSyncPatch(buildWithdrawalPatch({
+            beneficiary: "therapist",
+            txHash: receipt.transactionHash,
+          })),
+        )
+        .ilike("therapist_wallet", therapistWallet)
+        .in("settlement_status", [
+          "released_to_therapist",
+          "penalty_paid_to_therapist",
+        ])
+        .is("therapist_withdrawal_tx_hash", null)
+        .select("id");
+
+      if (syncError) {
+        logMirrorSyncError("therapist withdrawal mirror sync failed", {
+          txHash: receipt.transactionHash,
+          walletAddress: therapistWallet,
+          message: syncError.message,
+        });
+        setDataError(
+          "The on-chain withdrawal succeeded, but the session records could not be synced. Please refresh.",
+        );
+        return;
+      }
+
+      logMirrorSync("therapist withdrawal mirror sync complete", {
+        txHash: receipt.transactionHash,
+        walletAddress: therapistWallet,
+        syncedSessionCount: syncedRows?.length ?? 0,
+        usedFallback: !withdrawalEvent,
+      });
+      setRefreshNonce((current) => current + 1);
+
+      setSettingsMessage(
+        `Withdrawal confirmed on-chain. Tx: ${receipt.transactionHash}`,
+      );
+    } catch (error) {
+      setDataError(
+        error instanceof Error
+          ? error.message
+          : "Unable to claim funds right now.",
+      );
+    } finally {
+      setIsClaimingFunds(false);
+    }
   };
 
   return (
@@ -791,35 +1492,58 @@ export default function TherapistPortalPage() {
                   Available to Claim
                 </p>
                 <p className="mt-3 text-3xl font-semibold text-[var(--text-primary)]">
-                  {formatEth(profile.totalEarnedEth)}
+                  {claimableBalanceError
+                    ? "Unavailable"
+                    : isLoadingClaimableBalance
+                      ? "Loading..."
+                      : formatEth(claimableBalanceEth)}
                 </p>
                 <p className="mt-2 text-sm text-[var(--text-muted)]">
-                  Synced from therapist earnings recorded in Supabase.
+                  {claimableBalanceError
+                    ? "Unable to read the escrow contract claimable balance right now."
+                    : "On-chain claimable balance for this therapist wallet."}
                 </p>
               </div>
             </div>
 
+            <div className="liquid-glass-soft mt-4 rounded-[22px] border border-white/5 px-4 py-4">
+              <p className="text-xs uppercase tracking-[0.18em] text-[var(--text-faint)]">
+                Recorded Unclaimed Estimate
+              </p>
+              <p className="mt-2 text-sm text-[var(--text-muted)]">
+                Supabase mirror only: {formatEth(recordedOutstandingPayoutEth)} still
+                marked as unwithdrawn. Historical payouts are listed below.
+              </p>
+            </div>
+
             <button
               type="button"
+              onClick={() => void handleClaimFunds()}
+              disabled={
+                isClaimingFunds ||
+                isLoadingClaimableBalance ||
+                Boolean(claimableBalanceError) ||
+                !hasClaimableBalance
+              }
               className="button-primary mt-5 w-full rounded-full px-5 py-3 text-sm font-medium"
             >
-              Claim Funds
+              {claimFundsButtonLabel}
             </button>
 
             <div className="mt-8">
               <p className="text-sm uppercase tracking-[0.22em] text-[var(--text-faint)]">
-                Recent Completed Sessions
+                Recent Recorded Payouts
               </p>
               <div className="mt-4 space-y-3">
-                {completedSessions.length === 0 ? (
+                {recordedPayoutSessions.length === 0 ? (
                   <div className="liquid-glass-soft rounded-[22px] border border-white/5 px-4 py-4">
                     <p className="text-sm text-[var(--text-muted)]">
-                      No completed sessions yet.
+                      No recorded payout sessions yet.
                     </p>
                   </div>
                 ) : null}
 
-                {completedSessions.map((session) => (
+                {recordedPayoutSessions.map((session) => (
                   <div
                     key={session.id}
                     className="liquid-glass-soft rounded-[22px] border border-white/5 px-4 py-4"
@@ -833,10 +1557,23 @@ export default function TherapistPortalPage() {
                           {formatSessionDate(session.completedAt)}
                         </p>
                       </div>
-                      <StatusBadge label="Completed" tone="success" />
+                      <StatusBadge
+                        label={
+                          session.status === "patient_no_show"
+                            ? "Patient No-Show"
+                            : "Completed"
+                        }
+                        tone={
+                          session.status === "patient_no_show"
+                            ? "warning"
+                            : "success"
+                        }
+                      />
                     </div>
                     <p className="mt-4 text-sm text-[var(--text-muted)]">
-                      {formatEth(session.amountEth)} settled
+                      {session.status === "patient_no_show"
+                        ? `${formatEth(session.therapistPayoutEth)} no-show compensation`
+                        : `${formatEth(session.therapistPayoutEth)} therapist payout`}
                     </p>
                     <p className="mt-1 text-xs uppercase tracking-[0.18em] text-[var(--text-faint)]">
                       Tx: {session.txHash}

@@ -6,7 +6,6 @@ import { formatEther } from "viem";
 import { useAccount, useBalance } from "wagmi";
 import GlassCard from "./GlassCard";
 import AuthTabs from "./AuthTabs";
-import StatusBadge from "./StatusBadge";
 import WalletConnectButton from "./WalletConnectButton";
 import { supabase } from "../lib/supabase";
 
@@ -37,7 +36,7 @@ export default function AuthCard({ initialMode = "create" }: AuthCardProps) {
     }
 
     return {
-      title: "Initialize your anonymous vault",
+      title: "Initialise your anonymous vault",
       description:
         "First time here? Connect your wallet to generate a secure vault. Enter a government support code if you are claiming a session subsidy.",
       buttonLabel: "Initialize Vault",
@@ -207,11 +206,13 @@ export default function AuthCard({ initialMode = "create" }: AuthCardProps) {
   };
 
   return (
-    <GlassCard className="glass-panel p-6 sm:p-8">
+    <GlassCard className="glass-panel auth-card p-6 sm:p-8">
       <div className="mb-8 flex flex-col gap-5">
-        <StatusBadge label="Gov Subsidy + Wallet Auth" tone="neutral" />
+        <span className="auth-card__badge inline-flex w-fit items-center rounded-full border px-3 py-1 text-xs font-medium tracking-[0.18em]">
+          Gov Subsidy + Wallet Auth
+        </span>
         <div>
-          <h1 className="text-3xl font-semibold text-[var(--text-primary)]">
+          <h1 className="font-hero-syne text-3xl text-[var(--text-primary)]">
             {content.title}
           </h1>
           <p className="mt-3 max-w-xl text-base leading-7 text-[var(--text-muted)]">
@@ -235,7 +236,7 @@ export default function AuthCard({ initialMode = "create" }: AuthCardProps) {
               type="text"
               value={supportCode}
               onChange={(event) => setSupportCode(event.target.value)}
-              className="form-input w-full"
+              className="form-input auth-card__input w-full"
               placeholder="e.g. NHS-2026"
             />
             <p className="mt-2 text-xs text-[var(--text-muted)]">
@@ -246,7 +247,7 @@ export default function AuthCard({ initialMode = "create" }: AuthCardProps) {
         ) : null}
 
         {mode === "create" ? (
-          <div className="liquid-glass-soft rounded-[22px] border border-[var(--accent-primary)]/15 bg-[var(--accent-primary)]/6 px-4 py-5">
+          <div className="auth-card__surface rounded-[22px] px-4 py-5">
             <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
               <div>
                 <p className="text-sm font-medium text-[var(--text-primary)]">
@@ -261,7 +262,7 @@ export default function AuthCard({ initialMode = "create" }: AuthCardProps) {
             </div>
           </div>
         ) : (
-          <div className="flex w-full flex-col items-center justify-center gap-4 rounded-[24px] border border-[var(--glass-border-soft)] bg-white/[0.02] px-6 py-8 text-center">
+          <div className="auth-card__surface flex w-full flex-col items-center justify-center gap-4 rounded-[24px] px-6 py-8 text-center">
             <p className="max-w-md text-sm leading-6 text-[var(--text-muted)]">
               Connect the wallet you used before and MindPass will verify your key automatically.
             </p>

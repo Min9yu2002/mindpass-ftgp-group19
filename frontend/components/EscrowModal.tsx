@@ -82,7 +82,7 @@ export default function EscrowModal({
             type="button"
             onClick={onClose}
             disabled={isProcessing}
-            className="glass-chip-muted flex h-10 w-10 items-center justify-center rounded-full text-lg text-[var(--text-muted)] transition hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+            className="control-secondary flex h-10 w-10 items-center justify-center rounded-full text-lg disabled:cursor-not-allowed disabled:opacity-60"
             aria-label="Close escrow modal"
           >
             ×

@@ -3,15 +3,17 @@
 import { Suspense, useEffect, useEffectEvent, useRef, useState } from "react";
 import { Lock } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useAccount } from "wagmi";
+import {
+  readContract,
+  simulateContract,
+  waitForTransactionReceipt,
+  writeContract,
+} from "@wagmi/core";
+import { useAccount, useChainId, useConfig } from "wagmi";
 import SessionOutcomeNoticeModal from "../../components/SessionOutcomeNoticeModal";
 import SessionCompletionModal from "../../components/SessionCompletionModal";
 import SupportRequestModal from "../../components/SupportRequestModal";
 import VoiceCallControls from "../../components/VoiceCallControls";
-import {
-  NORMAL_THERAPIST_PAYOUT_ETH,
-  PLATFORM_FEE_ETH,
-} from "../../lib/booking";
 import { usePageSessionGuard } from "../../lib/session-guard";
 import {
   getTerminalSessionOutcome,
@@ -21,17 +23,52 @@ import {
   type TerminalOutcomeCopy,
 } from "../../lib/session-outcome";
 import {
+  buildPatientCheckedInPatch,
+  buildSessionStartedPatch,
+  buildTherapistCheckedInPatch,
+  buildSessionCompletedPatch,
+  compactSessionSyncPatch,
+  normalizeOnchainSessionId,
+  unixSecondsToIsoString,
+} from "../../lib/onchain-session-mapping";
+import {
+  MINDPASS_ESCROW_CHAIN_ID,
+  MINDPASS_ESCROW_ABI,
+  MINDPASS_ESCROW_DEPLOYMENT,
+  NORMAL_PROTOCOL_FEE_WEI,
+  NORMAL_THERAPIST_PAYOUT_WEI,
+  findMindPassEscrowEvent,
+  normalizeMindPassEscrowSession,
+  prepareCheckInAsPatient,
+  prepareCheckInAsTherapist,
+  prepareConfirmSessionEnd,
+  prepareResolveNoShow,
+  prepareResolvePaymentTimeout,
+  prepareRequestSessionEnd,
+  type HexAddress,
+} from "../../lib/mindpassEscrow";
+import {
+  logEscrowDebug,
+  logMirrorSync,
+  logMirrorSyncError,
+  logReceiptDecode,
+} from "../../lib/escrow-debug";
+import {
   acknowledgeDeadlineOutcome,
   buildDeadlineOutcomeAckKey,
   isDeadlineOutcomeAcknowledged,
 } from "../../lib/session-outcome-ack";
 import {
-  canAutoStartSession,
   canRecordArrivalInteraction,
   canCompleteSession,
-  getNoShowCatchUpSettlement,
-  shouldCatchPaymentTimeout,
 } from "../../lib/session-transition-guards";
+import {
+  buildResolutionPatchFromEvent,
+  buildResolutionPatchFromChainSession,
+  type EscrowResolutionEventInput,
+  getEscrowResolutionKind,
+  isTerminalEscrowResolutionStatus,
+} from "../../lib/escrow-resolution";
 import {
   isAcceptedAwaitingPaymentStatus,
   isChatAllowedStatus,
@@ -78,14 +115,17 @@ type OutcomeModalContext = {
 type SessionRecord = {
   id: string;
   status: SessionWorkflowStatus;
+  onchainSessionId: string | null;
   patientWallet: string;
   therapistWallet: string;
   updatedAt: string | null;
+  fundedAt: string | null;
   patientJoinedAt: string | null;
   therapistJoinedAt: string | null;
   sessionStartedAt: string | null;
   paymentDueAt: string | null;
   noShowDeadlineAt: string | null;
+  completedAt: string | null;
   settlementStatus: string;
 };
 
@@ -108,6 +148,12 @@ type SessionEndRequestRecord = {
   createdAt: string | null;
 };
 
+type CompletedSessionSyncValues = {
+  therapistPayoutWei: bigint;
+  protocolFeeWei: bigint;
+  completedAt: bigint;
+};
+
 const formatTime = (value?: string) => {
   const date = value ? new Date(value) : new Date();
 
@@ -122,6 +168,69 @@ const formatTime = (value?: string) => {
 };
 
 const CHAT_SESSION_DURATION_SECONDS = 50 * 60;
+const IS_DEV = process.env.NODE_ENV !== "production";
+
+function logChatLifecycle(label: string, payload: Record<string, unknown>) {
+  if (!IS_DEV) {
+    return;
+  }
+
+  console.debug("[chat-lifecycle]", label, payload);
+}
+
+function logChatLifecycleRecheck(
+  label: string,
+  payload: Record<string, unknown>,
+) {
+  if (!IS_DEV) {
+    return;
+  }
+
+  console.debug("[chat-lifecycle-recheck]", label, payload);
+}
+
+function logChatSendGate(label: string, payload: Record<string, unknown>) {
+  if (!IS_DEV) {
+    return;
+  }
+
+  console.debug("[chat-send-gate]", label, payload);
+}
+
+function logArrivalAudit(label: string, payload: Record<string, unknown>) {
+  if (!IS_DEV) {
+    return;
+  }
+
+  console.debug("[arrival-audit]", label, payload);
+}
+
+function logArrivalIntent(label: string, payload: Record<string, unknown>) {
+  if (!IS_DEV) {
+    return;
+  }
+
+  console.debug("[arrival-intent]", label, payload);
+}
+
+function logCheckinMirrorFix(label: string, payload: Record<string, unknown>) {
+  if (!IS_DEV) {
+    return;
+  }
+
+  console.debug("[checkin-mirror-fix]", label, payload);
+}
+
+function logSessionEndArrivalAudit(
+  label: string,
+  payload: Record<string, unknown>,
+) {
+  if (!IS_DEV) {
+    return;
+  }
+
+  console.debug("[session-end-arrival-audit]", label, payload);
+}
 
 const formatCountdown = (seconds: number) => {
   const minutes = Math.floor(seconds / 60);
@@ -137,16 +246,157 @@ function getSessionSecondsLeft(
   now = Date.now(),
 ) {
   if (!session?.sessionStartedAt) {
-    return CHAT_SESSION_DURATION_SECONDS;
+    return null;
   }
 
   const startedAt = new Date(session.sessionStartedAt).getTime();
   if (Number.isNaN(startedAt)) {
-    return CHAT_SESSION_DURATION_SECONDS;
+    return null;
   }
 
   const elapsedSeconds = Math.max(0, Math.floor((now - startedAt) / 1000));
   return Math.max(0, CHAT_SESSION_DURATION_SECONDS - elapsedSeconds);
+}
+
+function getNoShowSecondsLeft(
+  session: SessionRecord | null,
+  now = Date.now(),
+) {
+  if (
+    !session ||
+    session.status !== "funded" ||
+    session.sessionStartedAt ||
+    !session.noShowDeadlineAt
+  ) {
+    return null;
+  }
+
+  const deadlineAt = new Date(session.noShowDeadlineAt).getTime();
+  if (Number.isNaN(deadlineAt)) {
+    return null;
+  }
+
+  return Math.max(0, Math.floor((deadlineAt - now) / 1000));
+}
+
+function isSessionStarted(session: SessionRecord | null) {
+  return Boolean(
+    session?.status === "in_session" &&
+      session.patientJoinedAt &&
+      session.therapistJoinedAt &&
+      session.sessionStartedAt,
+  );
+}
+
+function getParticipantJoinedAt(
+  session: SessionRecord | null,
+  role: SessionParticipantRole,
+) {
+  if (!session) {
+    return null;
+  }
+
+  return role === "therapist"
+    ? session.therapistJoinedAt
+    : session.patientJoinedAt;
+}
+
+function hasCurrentParticipantCheckedIn(
+  session: SessionRecord | null,
+  role: SessionParticipantRole,
+) {
+  return Boolean(getParticipantJoinedAt(session, role));
+}
+
+function isWaitingForOtherParticipant(
+  session: SessionRecord | null,
+  role: SessionParticipantRole,
+) {
+  if (!session || isSessionStarted(session) || session.status !== "funded") {
+    return false;
+  }
+
+  const currentParticipantJoinedAt = getParticipantJoinedAt(session, role);
+  const otherParticipantJoinedAt = getParticipantJoinedAt(
+    session,
+    role === "therapist" ? "patient" : "therapist",
+  );
+
+  return Boolean(
+    currentParticipantJoinedAt &&
+      !otherParticipantJoinedAt &&
+      !session.sessionStartedAt,
+  );
+}
+
+function getPreStartSessionMessage(
+  session: SessionRecord | null,
+  role: SessionParticipantRole,
+) {
+  if (!session) {
+    return "This session is no longer available.";
+  }
+
+  if (session.status === "accepted_awaiting_payment") {
+    return "Chat unlocks after payment is confirmed on-chain.";
+  }
+
+  if (session.status !== "funded" || session.sessionStartedAt) {
+    return "Chat will unlock once the live session has started.";
+  }
+
+  const currentParticipantJoinedAt = getParticipantJoinedAt(session, role);
+  const otherParticipantJoinedAt = getParticipantJoinedAt(
+    session,
+    role === "therapist" ? "patient" : "therapist",
+  );
+
+  if (currentParticipantJoinedAt && otherParticipantJoinedAt) {
+    return "Both participants have checked in. Live session start is still syncing.";
+  }
+
+  if (currentParticipantJoinedAt) {
+    return "You're checked in. Waiting for the other participant to arrive before chat unlocks.";
+  }
+
+  return "Check in first. Chat unlocks once both participants have arrived.";
+}
+
+function getChatBlockedReason(
+  session: SessionRecord | null,
+  role: SessionParticipantRole,
+) {
+  if (!session) {
+    return "missing_session_record";
+  }
+
+  if (!isChatAllowedStatus(session.status)) {
+    return "session_terminal";
+  }
+
+  if (isSessionStarted(session)) {
+    return null;
+  }
+
+  if (session.status !== "funded") {
+    return "session_not_started";
+  }
+
+  const currentParticipantJoinedAt = getParticipantJoinedAt(session, role);
+  const otherParticipantJoinedAt = getParticipantJoinedAt(
+    session,
+    role === "therapist" ? "patient" : "therapist",
+  );
+
+  if (!currentParticipantJoinedAt) {
+    return "arrival_not_persisted";
+  }
+
+  if (!otherParticipantJoinedAt) {
+    return "waiting_for_other_participant";
+  }
+
+  return "session_start_not_mirrored";
 }
 
 const formatWalletLabel = (wallet: string) =>
@@ -156,12 +406,32 @@ function normalizeSessionRecord(
   row: Record<string, unknown>,
   fallbackId = "",
 ): SessionRecord {
+  let onchainSessionId: string | null = null;
+  const rawOnchainSessionId = row.onchain_session_id;
+
+  if (
+    (typeof rawOnchainSessionId === "string" &&
+      rawOnchainSessionId.trim()) ||
+    typeof rawOnchainSessionId === "number" ||
+    typeof rawOnchainSessionId === "bigint"
+  ) {
+    try {
+      onchainSessionId = normalizeOnchainSessionId(
+        String(rawOnchainSessionId),
+      );
+    } catch {
+      onchainSessionId = null;
+    }
+  }
+
   return {
     id: String(row.id ?? fallbackId),
     status: normalizeSessionStatus(row.status),
+    onchainSessionId,
     patientWallet: String(row.patient_wallet ?? "").toLowerCase(),
     therapistWallet: String(row.therapist_wallet ?? "").toLowerCase(),
     updatedAt: typeof row.updated_at === "string" ? row.updated_at : null,
+    fundedAt: typeof row.funded_at === "string" ? row.funded_at : null,
     patientJoinedAt:
       typeof row.patient_joined_at === "string" ? row.patient_joined_at : null,
     therapistJoinedAt:
@@ -172,6 +442,8 @@ function normalizeSessionRecord(
       typeof row.payment_due_at === "string" ? row.payment_due_at : null,
     noShowDeadlineAt:
       typeof row.no_show_deadline_at === "string" ? row.no_show_deadline_at : null,
+    completedAt:
+      typeof row.completed_at === "string" ? row.completed_at : null,
     settlementStatus: String(row.settlement_status ?? ""),
   };
 }
@@ -386,6 +658,8 @@ function ChatRoomPage() {
   const searchParams = useSearchParams();
   const isTherapist = searchParams.get("role") === "therapist";
   const { address, status: accountStatus } = useAccount();
+  const chainId = useChainId();
+  const wagmiConfig = useConfig();
   const sessionGuard = usePageSessionGuard({
     requiredRole: isTherapist ? "therapist" : "patient",
     address,
@@ -409,6 +683,7 @@ function ChatRoomPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [countdownNow, setCountdownNow] = useState(() => Date.now());
+  const [resolutionNow, setResolutionNow] = useState(() => Date.now());
   const [showWarningModal, setShowWarningModal] = useState(false);
   const [completionModalMode, setCompletionModalMode] =
     useState<CompletionModalMode | null>(null);
@@ -417,6 +692,8 @@ function ChatRoomPage() {
   const [sessionEndRequest, setSessionEndRequest] =
     useState<SessionEndRequestRecord | null>(null);
   const [sessionEndRequestError, setSessionEndRequestError] = useState("");
+  const [overdueResolutionError, setOverdueResolutionError] = useState("");
+  const [isResolvingOverdueSession, setIsResolvingOverdueSession] = useState(false);
   const [endRequestResponseText, setEndRequestResponseText] = useState("");
   const [therapistProfile, setTherapistProfile] = useState<TherapistProfile>({
     name: "Dr. Eliana Park",
@@ -427,6 +704,9 @@ function ChatRoomPage() {
   const [therapistError, setTherapistError] = useState("");
   const [voiceCallStatus, setVoiceCallStatus] =
     useState<VoiceCallStatus>("idle");
+  const [pendingArrivalTrigger, setPendingArrivalTrigger] = useState<
+    "send" | "voice" | null
+  >(null);
   const [activeSessionId, setActiveSessionId] = useState(sessionIdParam);
   const [sessionRecord, setSessionRecord] = useState<SessionRecord | null>(null);
   const [callError, setCallError] = useState("");
@@ -447,8 +727,8 @@ function ChatRoomPage() {
   const endRef = useRef<HTMLDivElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const promptedEndRequestIdRef = useRef<string | null>(null);
-  const finalizedEndRequestIdsRef = useRef(new Set<string>());
   const shownDeadlineOutcomeKeyRef = useRef<string | null>(null);
+  const arrivalIntentInFlightRef = useRef(false);
   const normalizedCurrentWallet = effectiveWallet.toLowerCase();
   const currentParticipantRole: SessionParticipantRole = isTherapist
     ? "therapist"
@@ -488,6 +768,10 @@ function ChatRoomPage() {
     !canRequestSessionEnd ||
     Boolean(pendingSessionEndRequest) ||
     isAcceptedSessionEndFinalizing;
+  const overdueResolutionKind = getEscrowResolutionKind(
+    sessionRecord,
+    resolutionNow,
+  );
   const declinedSessionEndSystemMessage: Message | null =
     showDeclinedSessionEndEvent && sessionEndRequest
       ? {
@@ -514,7 +798,52 @@ function ChatRoomPage() {
   );
   const endSessionButtonClassName =
     "inline-flex items-center gap-2 rounded-full bg-red-500 px-4 py-2 text-sm font-medium text-white shadow-[0_14px_32px_rgba(239,68,68,0.28)] transition hover:bg-red-400 disabled:cursor-not-allowed disabled:opacity-70";
-  const secondsLeft = getSessionSecondsLeft(sessionRecord, countdownNow);
+  const activeSessionSecondsLeft = getSessionSecondsLeft(
+    sessionRecord,
+    countdownNow,
+  );
+  const noShowSecondsLeft = getNoShowSecondsLeft(sessionRecord, countdownNow);
+  const chatSessionStarted = isSessionStarted(sessionRecord);
+  const currentParticipantJoinedAt = getParticipantJoinedAt(
+    sessionRecord,
+    currentParticipantRole,
+  );
+  const otherParticipantJoinedAt = getParticipantJoinedAt(
+    sessionRecord,
+    otherParticipantRole,
+  );
+  const preStartSessionMessage = getPreStartSessionMessage(
+    sessionRecord,
+    currentParticipantRole,
+  );
+  const isComposerBlockedWaitingForOtherParticipant = isWaitingForOtherParticipant(
+    sessionRecord,
+    currentParticipantRole,
+  );
+  const isPendingArrival = pendingArrivalTrigger !== null;
+  const visibleMessages = chatSessionStarted
+    ? renderedMessages
+    : renderedMessages.filter((message) => message.role === "system");
+  const routeMatchesLoadedSession = !sessionRecord || sessionRecord.id === activeSessionId;
+  const countdownLabel = chatSessionStarted
+    ? "Session Time Left"
+    : sessionRecord?.status === "funded" && noShowSecondsLeft !== null
+      ? "Check-In Window"
+      : "Session Timer";
+  const countdownValue =
+    chatSessionStarted && activeSessionSecondsLeft !== null
+      ? formatCountdown(activeSessionSecondsLeft)
+      : noShowSecondsLeft !== null
+        ? formatCountdown(noShowSecondsLeft)
+        : "--:--";
+  const shouldShowPreStartCountdown =
+    routeMatchesLoadedSession &&
+    sessionRecord?.status === "funded" &&
+    noShowSecondsLeft !== null;
+  const shouldShowStartedTimer =
+    routeMatchesLoadedSession &&
+    chatSessionStarted &&
+    activeSessionSecondsLeft !== null;
   const deadlineOutcomeModalCopy = deadlineOutcomeModal
     ? getTerminalSessionOutcome(deadlineOutcomeModal.status, isTherapist)
     : null;
@@ -546,6 +875,33 @@ function ChatRoomPage() {
       ackKey,
     });
   });
+
+  const openDeadlineOutcomeModal = (session: SessionRecord) => {
+    if (!isDeadlineOutcomeStatus(session.status)) {
+      return;
+    }
+
+    const ackKey = buildDeadlineOutcomeAckKey({
+      viewerRole: isTherapist ? "therapist" : "patient",
+      sessionId: session.id,
+      status: session.status,
+      updatedAt: session.updatedAt,
+    });
+
+    if (
+      shownDeadlineOutcomeKeyRef.current === ackKey ||
+      isDeadlineOutcomeAcknowledged(ackKey)
+    ) {
+      return;
+    }
+
+    shownDeadlineOutcomeKeyRef.current = ackKey;
+    setDeadlineOutcomeModal({
+      sessionId: session.id,
+      status: session.status,
+      ackKey,
+    });
+  };
 
   const presentPendingSessionEndRequest = useEffectEvent(
     (nextRequest: SessionEndRequestRecord) => {
@@ -621,6 +977,69 @@ function ChatRoomPage() {
   }, [effectiveWallet, isRestoringChatSession, sessionGuard.authResolutionState]);
 
   useEffect(() => {
+    if (!sessionRecord) {
+      return;
+    }
+
+    logChatLifecycleRecheck("loaded_session_snapshot", {
+      routeSessionId: activeSessionId,
+      loadedSessionId: sessionRecord.id,
+      onchainSessionId: sessionRecord.onchainSessionId,
+      status: sessionRecord.status,
+      fundedAt: sessionRecord.fundedAt,
+      patientJoinedAt: sessionRecord.patientJoinedAt,
+      therapistJoinedAt: sessionRecord.therapistJoinedAt,
+      sessionStartedAt: sessionRecord.sessionStartedAt,
+      noShowDeadlineAt: sessionRecord.noShowDeadlineAt,
+      currentRole: currentParticipantRole,
+      currentWallet: currentParticipantWallet,
+      isStarted: chatSessionStarted,
+      isFundedPreStart: sessionRecord.status === "funded" && !chatSessionStarted,
+    });
+    logChatLifecycle("session_row_loaded", {
+      sessionId: sessionRecord.id,
+      onchainSessionId: sessionRecord.onchainSessionId,
+      status: sessionRecord.status,
+      fundedAt: sessionRecord.fundedAt,
+      patientJoinedAt: sessionRecord.patientJoinedAt,
+      therapistJoinedAt: sessionRecord.therapistJoinedAt,
+      sessionStartedAt: sessionRecord.sessionStartedAt,
+      noShowDeadlineAt: sessionRecord.noShowDeadlineAt,
+      completedAt: sessionRecord.completedAt,
+      currentRole: currentParticipantRole,
+      currentWallet: currentParticipantWallet,
+      isStarted: chatSessionStarted,
+      isFundedPreStart: sessionRecord.status === "funded" && !chatSessionStarted,
+      shouldShowPreStartCountdown,
+      shouldShowStartedTimer,
+    });
+  }, [
+    chatSessionStarted,
+    currentParticipantRole,
+    currentParticipantWallet,
+    sessionRecord,
+    shouldShowPreStartCountdown,
+    shouldShowStartedTimer,
+  ]);
+
+  useEffect(() => {
+    if (!sessionRecord || routeMatchesLoadedSession) {
+      return;
+    }
+
+    logChatLifecycleRecheck("route_session_mismatch", {
+      routeSessionId: activeSessionId,
+      loadedSessionId: sessionRecord.id,
+      status: sessionRecord.status,
+      onchainSessionId: sessionRecord.onchainSessionId,
+    });
+  }, [
+    activeSessionId,
+    routeMatchesLoadedSession,
+    sessionRecord,
+  ]);
+
+  useEffect(() => {
     let isCancelled = false;
 
     const fetchTherapistProfile = async () => {
@@ -678,7 +1097,6 @@ function ChatRoomPage() {
     setDeadlineOutcomeModal(null);
     setSupportRequestContext(null);
     promptedEndRequestIdRef.current = null;
-    finalizedEndRequestIdsRef.current.clear();
     shownDeadlineOutcomeKeyRef.current = null;
   }, [activeSessionId]);
 
@@ -693,7 +1111,14 @@ function ChatRoomPage() {
   };
 
   useEffect(() => {
-    if (sessionRecord?.status !== "in_session" || !sessionRecord.sessionStartedAt) {
+    const shouldTickCountdown =
+      (sessionRecord?.status === "in_session" &&
+        Boolean(sessionRecord.sessionStartedAt)) ||
+      (sessionRecord?.status === "funded" &&
+        !sessionRecord.sessionStartedAt &&
+        Boolean(sessionRecord.noShowDeadlineAt));
+
+    if (!shouldTickCountdown) {
       setCountdownNow(Date.now());
       return () => {
         clearRegisteredTimeouts();
@@ -711,6 +1136,53 @@ function ChatRoomPage() {
       clearRegisteredTimeouts();
     };
   }, [sessionRecord?.sessionStartedAt, sessionRecord?.status]);
+
+  useEffect(() => {
+    logChatLifecycleRecheck("timer_branch_chosen", {
+      routeSessionId: activeSessionId,
+      loadedSessionId: sessionRecord?.id ?? null,
+      status: sessionRecord?.status ?? null,
+      sessionStartedAt: sessionRecord?.sessionStartedAt ?? null,
+      noShowDeadlineAt: sessionRecord?.noShowDeadlineAt ?? null,
+      computedSecondsLeft:
+        shouldShowStartedTimer
+          ? activeSessionSecondsLeft
+          : shouldShowPreStartCountdown
+            ? noShowSecondsLeft
+            : null,
+      timerMode: shouldShowStartedTimer
+        ? "active_session_timer"
+        : shouldShowPreStartCountdown
+          ? "pre_start_countdown"
+          : "terminal_or_none",
+    });
+    logChatLifecycle("header_timer_computed", {
+      sessionId: sessionRecord?.id ?? null,
+      status: sessionRecord?.status ?? null,
+      sessionStartedAt: sessionRecord?.sessionStartedAt ?? null,
+      noShowDeadlineAt: sessionRecord?.noShowDeadlineAt ?? null,
+      computedSecondsLeft:
+        shouldShowStartedTimer
+          ? activeSessionSecondsLeft
+          : shouldShowPreStartCountdown
+            ? noShowSecondsLeft
+            : null,
+      timerMode: shouldShowStartedTimer
+        ? "active_session_timer"
+        : shouldShowPreStartCountdown
+          ? "pre_start_countdown"
+          : "terminal_or_none",
+    });
+  }, [
+    activeSessionSecondsLeft,
+    noShowSecondsLeft,
+    sessionRecord?.id,
+    sessionRecord?.noShowDeadlineAt,
+    sessionRecord?.sessionStartedAt,
+    sessionRecord?.status,
+    shouldShowPreStartCountdown,
+    shouldShowStartedTimer,
+  ]);
 
   useEffect(() => {
     hasShownWarningRef.current = false;
@@ -739,13 +1211,13 @@ function ChatRoomPage() {
   };
 
   useEffect(() => {
-    if (secondsLeft === 10 * 60 && !hasShownWarningRef.current) {
+    if (activeSessionSecondsLeft === 10 * 60 && !hasShownWarningRef.current) {
       hasShownWarningRef.current = true;
       registerTimeout(() => {
         setShowWarningModal(true);
       }, 0);
     }
-  }, [secondsLeft]);
+  }, [activeSessionSecondsLeft]);
 
   useEffect(() => {
     return () => {
@@ -765,97 +1237,56 @@ function ChatRoomPage() {
       setCallError("");
       setAccessDeniedMessage("");
 
-      const applyChatCatchUp = async (session: SessionRecord) => {
-        if (shouldCatchPaymentTimeout(session)) {
-          const { data, error } = await client
-            .from("sessions")
-            .update({
-              status: "payment_timeout",
-              payment_timeout_at: new Date().toISOString(),
-              no_show_deadline_at: null,
-              settlement_status: "cancelled",
-            })
-            .eq("id", session.id)
-            .eq("status", "accepted_awaiting_payment")
-            .select("*")
-            .maybeSingle();
+      const applyChatCatchUp = async (session: SessionRecord) => session;
 
-          if (error) {
-            console.error("Failed to catch up payment timeout in chat", error);
-            return session;
-          }
-
-          return data
-            ? normalizeSessionRecord(data as Record<string, unknown>, session.id)
-            : null;
-        }
-
-        const settlement = getNoShowCatchUpSettlement(session);
-        if (settlement) {
-
-          const { data, error } = await client
-            .from("sessions")
-            .update(settlement)
-            .eq("id", session.id)
-            .eq("status", "funded")
-            .select("*")
-            .maybeSingle();
-
-          if (error) {
-            console.error("Failed to catch up no-show settlement in chat", error);
-            return session;
-          }
-
-          return data
-            ? normalizeSessionRecord(data as Record<string, unknown>, session.id)
-            : null;
-        }
-
-        return session;
-      };
-
-      const applyScopedOverdueFundedCatchUps = async () => {
-        if (sessionIdParam) {
+      const updateChatRouteSession = (nextSessionId: string) => {
+        if (!nextSessionId || nextSessionId === sessionIdParam) {
           return;
         }
 
-        const overdueQuery = isTherapist
+        const nextSearchParams = new URLSearchParams(searchParams.toString());
+        nextSearchParams.set("sessionId", nextSessionId);
+        router.replace(`/chat?${nextSearchParams.toString()}`);
+      };
+
+      const loadLatestActiveSessionRow = async () => {
+        if (!therapistAddress && !isTherapist) {
+          return null;
+        }
+
+        const query = isTherapist
           ? client
               .from("sessions")
               .select("*")
               .ilike("therapist_wallet", effectiveWallet)
-          : therapistAddress
-            ? client
-                .from("sessions")
-                .select("*")
-                .ilike("therapist_wallet", therapistAddress)
-                .ilike("patient_wallet", effectiveWallet)
-            : null;
+              .in("status", ["accepted_awaiting_payment", "funded", "in_session"])
+              .order("updated_at", { ascending: false })
+              .limit(1)
+          : client
+              .from("sessions")
+              .select("*")
+              .ilike("therapist_wallet", therapistAddress)
+              .ilike("patient_wallet", effectiveWallet)
+              .in("status", ["accepted_awaiting_payment", "funded", "in_session"])
+              .order("updated_at", { ascending: false })
+              .limit(1);
 
-        if (!overdueQuery) {
-          return;
+        const { data, error } = await query.maybeSingle();
+
+        if (isCancelled) {
+          return null;
         }
-
-        const { data, error } = await overdueQuery
-          .eq("status", "funded")
-          .is("session_started_at", null)
-          .not("no_show_deadline_at", "is", null)
-          .lte("no_show_deadline_at", new Date().toISOString())
-          .order("no_show_deadline_at", { ascending: true });
 
         if (error) {
-          console.error("Failed to load overdue funded sessions in chat", error);
-          return;
+          setCallError(error.message);
+          return null;
         }
 
-        for (const row of (data ?? []) as Record<string, unknown>[]) {
-          await applyChatCatchUp(
-            normalizeSessionRecord(
-              row,
-              String((row as Record<string, unknown>).id ?? ""),
-            ),
-          );
-        }
+        return data as Record<string, unknown> | null;
+      };
+
+      const applyScopedOverdueFundedCatchUps = async () => {
+        return;
       };
 
       const applyResolvedSession = async (row: Record<string, unknown> | null) => {
@@ -900,7 +1331,7 @@ function ChatRoomPage() {
         if (terminalOutcome) {
           stopLocalAudio();
           setVoiceCallStatus("idle");
-          setSessionRecord(nextSession);
+          applySessionRecord(nextSession, "resolve_session_terminal_guard");
           presentDeadlineOutcomeModal(nextSession);
           setTerminalSessionOutcome(terminalOutcome);
           setAccessDeniedMessage("");
@@ -915,8 +1346,9 @@ function ChatRoomPage() {
           return;
         }
 
+        updateChatRouteSession(nextSession.id);
         setActiveSessionId(nextSession.id);
-        setSessionRecord(nextSession);
+        applySessionRecord(nextSession, "resolve_session_active");
         setTerminalSessionOutcome(null);
         setAccessDeniedMessage("");
         setVoiceCallStatus("idle");
@@ -938,45 +1370,34 @@ function ChatRoomPage() {
           return;
         }
 
+        const normalizedRequestedSession = data
+          ? normalizeSessionRecord(data as Record<string, unknown>, sessionIdParam)
+          : null;
+        const shouldPreferLatestActiveSession =
+          !normalizedRequestedSession ||
+          Boolean(
+            getTerminalSessionOutcomeOrNull(
+              normalizedRequestedSession.status,
+              isTherapist,
+            ),
+          ) ||
+          !isChatAllowedStatus(normalizedRequestedSession.status);
+
+        if (shouldPreferLatestActiveSession) {
+          const latestActiveRow = await loadLatestActiveSessionRow();
+          if (latestActiveRow) {
+            await applyResolvedSession(latestActiveRow);
+            return;
+          }
+        }
+
         await applyResolvedSession(data as Record<string, unknown> | null);
         return;
       }
 
       await applyScopedOverdueFundedCatchUps();
-
-      if (!therapistAddress) {
-        return;
-      }
-
-      const query = isTherapist
-        ? client
-            .from("sessions")
-            .select("*")
-            .ilike("therapist_wallet", effectiveWallet)
-            .in("status", ["accepted_awaiting_payment", "funded", "in_session"])
-            .order("updated_at", { ascending: false })
-            .limit(1)
-        : client
-            .from("sessions")
-            .select("*")
-            .ilike("therapist_wallet", therapistAddress)
-            .ilike("patient_wallet", effectiveWallet)
-            .in("status", ["accepted_awaiting_payment", "funded", "in_session"])
-            .order("updated_at", { ascending: false })
-            .limit(1);
-
-      const { data, error } = await query.maybeSingle();
-
-      if (isCancelled) {
-        return;
-      }
-
-      if (error) {
-        setCallError(error.message);
-        return;
-      }
-
-      await applyResolvedSession(data as Record<string, unknown> | null);
+      const latestActiveRow = await loadLatestActiveSessionRow();
+      await applyResolvedSession(latestActiveRow);
     };
 
     resolveSession();
@@ -1015,7 +1436,7 @@ function ChatRoomPage() {
             activeSessionId,
           );
           setMessageRefreshNonce((current) => current + 1);
-          setSessionRecord(next);
+          applySessionRecord(next, "realtime_session_update");
           const terminalOutcome = getTerminalSessionOutcomeOrNull(
             next.status,
             isTherapist,
@@ -1357,166 +1778,510 @@ function ChatRoomPage() {
   ]);
 
   useEffect(() => {
-    if (!supabase || !activeSessionId || !sessionRecord) {
+    if (
+      !activeSessionId ||
+      !sessionRecord ||
+      !(
+        (sessionRecord.status === "funded" && sessionRecord.noShowDeadlineAt) ||
+        (isAcceptedAwaitingPaymentStatus(sessionRecord.status) &&
+          sessionRecord.paymentDueAt)
+      )
+    ) {
       return;
     }
 
-    const client = supabase;
-    if (!canAutoStartSession(sessionRecord)) {
+    const targetDeadline =
+      sessionRecord.status === "funded"
+        ? sessionRecord.noShowDeadlineAt
+        : sessionRecord.paymentDueAt;
+    if (!targetDeadline) {
+      return;
+    }
+    const deadline = new Date(targetDeadline).getTime();
+    if (Number.isNaN(deadline)) {
       return;
     }
 
-    const startSession = async () => {
-      const startedAt = new Date().toISOString();
-      const { data, error } = await client
-        .from("sessions")
-        .update({
-          status: "in_session",
-          session_started_at: startedAt,
-        })
-        .eq("id", activeSessionId)
-        .eq("status", "funded")
-        .select("*")
-        .maybeSingle();
+    const timeoutId = window.setTimeout(() => {
+      setResolutionNow(Date.now());
+    }, Math.max(0, deadline - Date.now()));
 
-      if (error) {
-        console.error("Failed to start funded session", error);
-        return;
-      }
-
-      if (data) {
-        setSessionRecord(
-          normalizeSessionRecord(data as Record<string, unknown>, activeSessionId),
-        );
-      }
+    return () => {
+      window.clearTimeout(timeoutId);
     };
-
-    void startSession();
   }, [activeSessionId, sessionRecord]);
 
-  useEffect(() => {
+  const handleResolveOverdueSession = async () => {
     if (
       !supabase ||
-      !activeSessionId ||
       !sessionRecord ||
-      sessionRecord.status !== "funded" ||
-      !sessionRecord.noShowDeadlineAt
+      !activeSessionId ||
+      isResolvingOverdueSession
     ) {
       return;
     }
 
     const client = supabase;
-    const deadline = new Date(sessionRecord.noShowDeadlineAt).getTime();
-    if (Number.isNaN(deadline)) {
+    const resolutionKind = getEscrowResolutionKind(sessionRecord, Date.now());
+    if (!resolutionKind) {
+      setOverdueResolutionError("This session is not ready for on-chain resolution.");
       return;
     }
 
-    const timeoutId = window.setTimeout(async () => {
-      const updatePayload = getNoShowCatchUpSettlement(sessionRecord);
+    setIsResolvingOverdueSession(true);
+    setOverdueResolutionError("");
 
-      if (!updatePayload) {
-        return;
-      }
+    try {
+      const escrowSessionContext = getEscrowSessionContext(sessionRecord);
+      const onchainSessionId = escrowSessionContext.onchainSessionId;
+      const contractAddress = escrowSessionContext.contractAddress;
 
-      const { data, error } = await client
-        .from("sessions")
-        .update(updatePayload)
-        .eq("id", activeSessionId)
-        .eq("status", "funded")
-        .select("*")
-        .maybeSingle();
+      const syncResolvedSession = async (options: {
+        chainSession?: ReturnType<typeof normalizeMindPassEscrowSession>;
+        resolutionEvent?: EscrowResolutionEventInput | null;
+        resolutionTxHash?: string | null;
+        blockNumber?: bigint | null;
+        alreadyResolved?: boolean;
+      }) => {
+        const chainSession =
+          options.chainSession ??
+          normalizeMindPassEscrowSession(
+            (await readContract(wagmiConfig, {
+              address: contractAddress,
+              abi: MINDPASS_ESCROW_ABI,
+              functionName: "sessions",
+              args: [onchainSessionId],
+              chainId: MINDPASS_ESCROW_CHAIN_ID,
+            })) as readonly unknown[],
+          );
 
-      if (error) {
-        console.error("Failed to settle session no-show", error);
-        return;
-      }
+        const updatePatch = options.resolutionEvent
+          ? buildResolutionPatchFromEvent({
+              resolutionEvent: options.resolutionEvent,
+              contractAddress,
+              resolutionTxHash: options.resolutionTxHash,
+              blockNumber: options.blockNumber,
+            })
+          : buildResolutionPatchFromChainSession({
+              chainSession,
+              contractAddress,
+              resolutionTxHash: options.resolutionTxHash,
+              blockNumber: options.blockNumber,
+            });
 
-      if (data) {
+        if (!updatePatch) {
+          return false;
+        }
+
+        const { data, error } = await client
+          .from("sessions")
+          .update(compactSessionSyncPatch(updatePatch))
+          .eq("id", activeSessionId)
+          .eq("onchain_session_id", sessionRecord.onchainSessionId)
+          .select("*")
+          .maybeSingle();
+
+        if (error) {
+          logMirrorSyncError("chat overdue resolution mirror sync failed", {
+            sessionId: activeSessionId,
+            onchainSessionId: sessionRecord.onchainSessionId,
+            txHash: options.resolutionTxHash ?? null,
+            message: error.message,
+          });
+          setOverdueResolutionError(
+            options.resolutionTxHash
+              ? "Mirror sync failed after successful on-chain resolution. Please refresh."
+              : "This session is already resolved on-chain, but the mirror sync failed. Please refresh.",
+          );
+          return false;
+        }
+
+        if (!data) {
+          setOverdueResolutionError(
+            options.resolutionTxHash
+              ? "On-chain resolution succeeded, but the updated session row could not be loaded."
+              : "This session is already resolved on-chain, but the updated session row could not be loaded.",
+          );
+          return false;
+        }
+
         const nextSession = normalizeSessionRecord(
           data as Record<string, unknown>,
           activeSessionId,
         );
+        logMirrorSync("chat overdue resolution mirror sync complete", {
+          sessionId: activeSessionId,
+          onchainSessionId: sessionRecord.onchainSessionId,
+          txHash: options.resolutionTxHash ?? null,
+          status: nextSession.status,
+          alreadyResolved: options.alreadyResolved ?? false,
+        });
         stopLocalAudio();
         setVoiceCallStatus("idle");
-        setSessionRecord(nextSession);
-        presentDeadlineOutcomeModal(nextSession);
+        applySessionRecord(nextSession, "overdue_resolution_sync");
+        openDeadlineOutcomeModal(nextSession);
         setTerminalSessionOutcome(
           getTerminalSessionOutcomeOrNull(nextSession.status, isTherapist),
         );
         setAccessDeniedMessage("");
-      }
-    }, Math.max(0, deadline - Date.now()));
+        return true;
+      };
 
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [activeSessionId, isTherapist, sessionRecord]);
+      const chainSessionBefore = normalizeMindPassEscrowSession(
+        (await readContract(wagmiConfig, {
+          address: contractAddress,
+          abi: MINDPASS_ESCROW_ABI,
+          functionName: "sessions",
+          args: [onchainSessionId],
+          chainId: MINDPASS_ESCROW_CHAIN_ID,
+        })) as readonly unknown[],
+      );
 
-  useEffect(() => {
-    if (
-      !supabase ||
-      !activeSessionId ||
-      !sessionRecord ||
-      !isAcceptedAwaitingPaymentStatus(sessionRecord.status) ||
-      !sessionRecord.paymentDueAt
-    ) {
-      return;
-    }
-
-    const client = supabase;
-    const deadline = new Date(sessionRecord.paymentDueAt).getTime();
-    if (Number.isNaN(deadline)) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(async () => {
-      const { data, error } = await client
-        .from("sessions")
-        .update({
-          status: "payment_timeout",
-          payment_timeout_at: new Date().toISOString(),
-          no_show_deadline_at: null,
-          settlement_status: "cancelled",
-        })
-        .eq("id", activeSessionId)
-        .eq("status", "accepted_awaiting_payment")
-        .select("*")
-        .maybeSingle();
-
-      if (error) {
-        console.error("Failed to catch up payment timeout in chat runtime", error);
+      if (isTerminalEscrowResolutionStatus(chainSessionBefore.status)) {
+        await syncResolvedSession({
+          chainSession: chainSessionBefore,
+          alreadyResolved: true,
+        });
         return;
       }
 
-      if (data) {
-        const nextSession = normalizeSessionRecord(
-          data as Record<string, unknown>,
-          activeSessionId,
-        );
-        setSessionRecord(nextSession);
-        setTerminalSessionOutcome(
-          getTerminalSessionOutcomeOrNull(nextSession.status, isTherapist),
-        );
-        setAccessDeniedMessage("");
-      }
-    }, Math.max(0, deadline - Date.now()));
+      const request =
+        resolutionKind === "payment_timeout"
+          ? prepareResolvePaymentTimeout({
+              address: contractAddress,
+              sessionId: onchainSessionId,
+            })
+          : prepareResolveNoShow({
+              address: contractAddress,
+              sessionId: onchainSessionId,
+            });
 
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [activeSessionId, isTherapist, sessionRecord]);
+      logEscrowDebug("submitting chat overdue resolution", {
+        source: "chat",
+        sessionId: activeSessionId,
+        onchainSessionId: sessionRecord.onchainSessionId,
+        functionName: request.functionName,
+      });
+
+      let hash: `0x${string}`;
+      try {
+        const { request: simulatedRequest } = await simulateContract(
+          wagmiConfig,
+          {
+            address: request.address,
+            abi: request.abi,
+            functionName: request.functionName,
+            args: request.args,
+            chainId: request.chainId,
+            account: address,
+          },
+        );
+        hash = await writeContract(wagmiConfig, {
+          ...simulatedRequest,
+          address: request.address,
+          abi: request.abi,
+          functionName: request.functionName,
+          args: request.args,
+          chainId: request.chainId,
+        });
+      } catch (error) {
+        const chainSessionAfterFailure = normalizeMindPassEscrowSession(
+          (await readContract(wagmiConfig, {
+            address: contractAddress,
+            abi: MINDPASS_ESCROW_ABI,
+            functionName: "sessions",
+            args: [onchainSessionId],
+            chainId: MINDPASS_ESCROW_CHAIN_ID,
+          })) as readonly unknown[],
+        );
+
+        if (isTerminalEscrowResolutionStatus(chainSessionAfterFailure.status)) {
+          await syncResolvedSession({
+            chainSession: chainSessionAfterFailure,
+            alreadyResolved: true,
+          });
+          return;
+        }
+
+        throw error;
+      }
+
+      const receipt = await waitForTransactionReceipt(wagmiConfig, {
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+        hash,
+      });
+      logReceiptDecode({
+        context: "chat overdue resolution receipt decoded",
+        txHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+        logs: receipt.logs,
+      });
+
+      const resolutionEvent =
+        resolutionKind === "payment_timeout"
+          ? findMindPassEscrowEvent(receipt.logs, "PaymentTimedOut")
+          : findMindPassEscrowEvent(receipt.logs, "PatientNoShowResolved") ??
+            findMindPassEscrowEvent(receipt.logs, "TherapistNoShowResolved");
+
+      if (!resolutionEvent) {
+        throw new Error(
+          resolutionKind === "payment_timeout"
+            ? "Timeout resolution transaction succeeded, but the PaymentTimedOut event was missing."
+            : "No-show resolution transaction succeeded, but the no-show event was missing.",
+        );
+      }
+
+      await syncResolvedSession({
+        resolutionEvent: resolutionEvent as EscrowResolutionEventInput | null,
+        resolutionTxHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message.toLowerCase() : "";
+      if (
+        message.includes("user rejected") ||
+        message.includes("user denied") ||
+        message.includes("rejected the request") ||
+        message.includes("4001")
+      ) {
+        setOverdueResolutionError(
+          resolutionKind === "payment_timeout"
+            ? "Wallet signing was cancelled. Payment timeout is still unresolved on-chain."
+            : "Wallet signing was cancelled. No-show is still unresolved on-chain.",
+        );
+      } else if (message.includes("switch to sepolia")) {
+        setOverdueResolutionError(
+          "Wrong chain. Switch to Sepolia before resolving this escrow outcome.",
+        );
+      } else {
+        setOverdueResolutionError(
+          error instanceof Error
+            ? error.message
+            : "Unable to resolve this escrow outcome right now.",
+        );
+      }
+    } finally {
+      setIsResolvingOverdueSession(false);
+    }
+  };
 
   const handleSend = async (event: React.FormEvent) => {
     event.preventDefault();
 
     const trimmedDraft = draft.trim();
-    if (!trimmedDraft || !supabase || !activeSessionId || !effectiveWallet) {
+    if (!trimmedDraft) {
+      return;
+    }
+
+    if (!supabase || !activeSessionId || !effectiveWallet || !sessionRecord) {
+      logChatLifecycle("handle_send_blocked", {
+        insertAllowed: false,
+        blockedReason: !sessionRecord
+          ? "missing_session_record"
+          : !effectiveWallet
+            ? "missing_wallet"
+            : !activeSessionId
+              ? "missing_session_id"
+              : "missing_supabase_client",
+      });
       return;
     }
 
     const client = supabase;
     const senderRole: Message["role"] = isTherapist ? "therapist" : "patient";
     setChatMessagesError("");
+    const route = "/chat";
+    logChatSendGate("send_entered", {
+      sessionId: activeSessionId,
+      role: currentParticipantRole,
+      wallet: effectiveWallet.toLowerCase(),
+      statusBeforeSend: sessionRecord.status,
+      patientJoinedAtBeforeSend: sessionRecord.patientJoinedAt,
+      therapistJoinedAtBeforeSend: sessionRecord.therapistJoinedAt,
+      sessionStartedAtBeforeSend: sessionRecord.sessionStartedAt,
+      messageLength: trimmedDraft.length,
+    });
+    logArrivalAudit("send_path_entered", {
+      sessionId: sessionRecord.id,
+      activeSessionId,
+      status: sessionRecord.status,
+      patientJoinedAt: sessionRecord.patientJoinedAt,
+      therapistJoinedAt: sessionRecord.therapistJoinedAt,
+      sessionStartedAt: sessionRecord.sessionStartedAt,
+      route,
+      triggerSource: "send",
+    });
+    logArrivalIntent(
+      "send_path_entered",
+      buildArrivalIntentLogPayload(sessionRecord, "send", false),
+    );
+    logChatLifecycleRecheck("send_path_entered", {
+      routeSessionId: activeSessionId,
+      loadedSessionId: sessionRecord.id,
+      role: currentParticipantRole,
+      wallet: effectiveWallet.toLowerCase(),
+      statusBeforeSend: sessionRecord.status,
+      patientJoinedAtBeforeSend: sessionRecord.patientJoinedAt,
+      therapistJoinedAtBeforeSend: sessionRecord.therapistJoinedAt,
+      sessionStartedAtBeforeSend: sessionRecord.sessionStartedAt,
+      messageLength: trimmedDraft.length,
+    });
+    logChatLifecycle("handle_send_entered", {
+      sessionId: activeSessionId,
+      role: currentParticipantRole,
+      wallet: effectiveWallet.toLowerCase(),
+      statusBeforeSend: sessionRecord.status,
+      patientJoinedAtBeforeSend: sessionRecord.patientJoinedAt,
+      therapistJoinedAtBeforeSend: sessionRecord.therapistJoinedAt,
+      sessionStartedAtBeforeSend: sessionRecord.sessionStartedAt,
+      messageLength: trimmedDraft.length,
+    });
+
+    let latestSession: SessionRecord | null =
+      await refreshLatestSessionRowForRecheck(client, "handle_send_initial_refresh");
+    if (!latestSession) {
+      latestSession = sessionRecord;
+    }
+
+    const shouldAttemptArrival =
+      !isSessionStarted(latestSession) &&
+      !hasCurrentParticipantCheckedIn(latestSession, currentParticipantRole);
+
+    if (shouldAttemptArrival) {
+      const arrivalResult = await attemptArrivalFromIntent(
+        client,
+        latestSession,
+        "send",
+      );
+      latestSession = arrivalResult.latestSession;
+
+      if (arrivalResult.blockedByPending) {
+        setChatMessagesError(
+          arrivalResult.errorMessage ??
+            "Check-in is already pending in your wallet. Confirm or reject it before trying again.",
+        );
+        return;
+      }
+
+      if (!arrivalResult.arrivalConfirmed) {
+        setChatMessagesError(
+          arrivalResult.errorMessage ??
+            "Unable to confirm your check-in right now. Please try again.",
+        );
+        return;
+      }
+
+      if (!isSessionStarted(latestSession)) {
+        logArrivalIntent(
+          "send_waiting_for_other_participant",
+          buildArrivalIntentLogPayload(latestSession, "send", false),
+        );
+        setChatMessagesError(
+          "You are checked in. Your message will be ready to send once the other participant arrives.",
+        );
+        return;
+      }
+    }
+
+    const sendBlockedReason = getChatBlockedReason(
+      latestSession,
+      currentParticipantRole,
+    );
+    logChatLifecycle("handle_send_after_arrival", {
+      didAttemptArrival: false,
+      refreshedSessionStatus: latestSession?.status ?? null,
+      refreshedPatientJoinedAt: latestSession?.patientJoinedAt ?? null,
+      refreshedTherapistJoinedAt: latestSession?.therapistJoinedAt ?? null,
+      refreshedSessionStartedAt: latestSession?.sessionStartedAt ?? null,
+      canInsertMessage: !sendBlockedReason,
+      blockedReason: sendBlockedReason,
+    });
+    logChatLifecycleRecheck("send_path_after_arrival", {
+      routeSessionId: activeSessionId,
+      loadedSessionId: latestSession?.id ?? null,
+      didAttemptArrival: false,
+      refreshedSessionStatus: latestSession?.status ?? null,
+      refreshedPatientJoinedAt: latestSession?.patientJoinedAt ?? null,
+      refreshedTherapistJoinedAt: latestSession?.therapistJoinedAt ?? null,
+      refreshedSessionStartedAt: latestSession?.sessionStartedAt ?? null,
+      canInsertMessage: !sendBlockedReason,
+      blockedReason: sendBlockedReason,
+    });
+
+    if (sendBlockedReason) {
+      logChatSendGate("insert_blocked_prestart", {
+        sessionId: activeSessionId,
+        role: currentParticipantRole,
+        blockedReason: sendBlockedReason,
+      });
+      logArrivalAudit("send_blocked_not_started", {
+        sessionId: latestSession?.id ?? sessionRecord.id,
+        activeSessionId,
+        status: latestSession?.status ?? sessionRecord.status,
+        patientJoinedAt: latestSession?.patientJoinedAt ?? sessionRecord.patientJoinedAt,
+        therapistJoinedAt:
+          latestSession?.therapistJoinedAt ?? sessionRecord.therapistJoinedAt,
+        sessionStartedAt:
+          latestSession?.sessionStartedAt ?? sessionRecord.sessionStartedAt,
+        route,
+        triggerSource: "send",
+      });
+      logChatLifecycle("handle_send_blocked", {
+        insertAllowed: false,
+        blockedReason: sendBlockedReason,
+      });
+      logChatLifecycleRecheck("insert_blocked", {
+        routeSessionId: activeSessionId,
+        loadedSessionId: latestSession?.id ?? null,
+        insertAllowed: false,
+        blockedReason: sendBlockedReason,
+      });
+      setChatMessagesError(
+        getPreStartSessionMessage(latestSession, currentParticipantRole),
+      );
+      return;
+    }
+
+    logArrivalIntent(
+      "send_insert_allowed",
+      buildArrivalIntentLogPayload(latestSession, "send", false),
+    );
+    logArrivalAudit("send_allowed_started", {
+      sessionId: latestSession?.id ?? sessionRecord.id,
+      activeSessionId,
+      status: latestSession?.status ?? sessionRecord.status,
+      patientJoinedAt: latestSession?.patientJoinedAt ?? sessionRecord.patientJoinedAt,
+      therapistJoinedAt:
+        latestSession?.therapistJoinedAt ?? sessionRecord.therapistJoinedAt,
+      sessionStartedAt:
+        latestSession?.sessionStartedAt ?? sessionRecord.sessionStartedAt,
+      route,
+      triggerSource: "send",
+    });
+    logChatSendGate("insert_allowed_started", {
+      sessionId: activeSessionId,
+      role: currentParticipantRole,
+      loadedSessionId: latestSession?.id ?? null,
+    });
+    logChatLifecycle("handle_send_insert_allowed", {
+      sessionId: activeSessionId,
+      senderRole,
+      senderWallet: effectiveWallet.toLowerCase(),
+      insertAllowed: true,
+    });
+    logChatLifecycleRecheck("insert_allowed", {
+      routeSessionId: activeSessionId,
+      loadedSessionId: latestSession?.id ?? null,
+      insertAllowed: true,
+    });
+    logChatLifecycleRecheck("insert_payload_session_id", {
+      routeSessionId: activeSessionId,
+      loadedSessionId: latestSession?.id ?? null,
+      payloadSessionId: activeSessionId,
+      senderRole,
+      senderWallet: effectiveWallet.toLowerCase(),
+    });
 
     const { data, error } = await client
       .from("chat_messages")
@@ -1545,8 +2310,6 @@ function ChatRoomPage() {
       );
     }
 
-    await recordCurrentParticipantArrival(client);
-
     setDraft("");
   };
 
@@ -1556,16 +2319,160 @@ function ChatRoomPage() {
       return;
     }
 
+    const route = "/chat";
+    logArrivalAudit("voice_path_entered", {
+      sessionId: sessionRecord.id,
+      activeSessionId,
+      status: sessionRecord.status,
+      patientJoinedAt: sessionRecord.patientJoinedAt,
+      therapistJoinedAt: sessionRecord.therapistJoinedAt,
+      sessionStartedAt: sessionRecord.sessionStartedAt,
+      route,
+      triggerSource: "voice",
+    });
+    logArrivalIntent(
+      "voice_path_entered",
+      buildArrivalIntentLogPayload(sessionRecord, "voice", false),
+    );
+    logChatLifecycle("handle_start_voice_call_entered", {
+      sessionId: activeSessionId,
+      status: sessionRecord.status,
+      patientJoinedAt: sessionRecord.patientJoinedAt,
+      therapistJoinedAt: sessionRecord.therapistJoinedAt,
+      sessionStartedAt: sessionRecord.sessionStartedAt,
+    });
+    logChatLifecycleRecheck("send_path_voice_entered", {
+      routeSessionId: activeSessionId,
+      loadedSessionId: sessionRecord.id,
+      status: sessionRecord.status,
+      patientJoinedAt: sessionRecord.patientJoinedAt,
+      therapistJoinedAt: sessionRecord.therapistJoinedAt,
+      sessionStartedAt: sessionRecord.sessionStartedAt,
+    });
+
     if (!isFundedOrLiveSessionStatus(sessionRecord.status)) {
+      logChatLifecycle("handle_start_voice_call_gate_evaluated", {
+        voiceConnectAllowed: false,
+        blockedReason: "session_not_funded_or_live",
+      });
       setCallError("Voice controls unlock once the session is funded.");
       return;
     }
 
     try {
       setCallError("");
+      let latestSession: SessionRecord | null =
+        await refreshLatestSessionRowForRecheck(
+          supabase,
+          "handle_start_voice_call_initial_refresh",
+      );
+      if (!latestSession) {
+        latestSession = sessionRecord;
+      }
+
+      const shouldAttemptArrival =
+        !isSessionStarted(latestSession) &&
+        !hasCurrentParticipantCheckedIn(latestSession, currentParticipantRole);
+
+      if (shouldAttemptArrival) {
+        const arrivalResult = await attemptArrivalFromIntent(
+          supabase,
+          latestSession,
+          "voice",
+        );
+        latestSession = arrivalResult.latestSession;
+
+        if (arrivalResult.blockedByPending) {
+          setCallError(
+            arrivalResult.errorMessage ??
+              "Check-in is already pending in your wallet. Confirm or reject it before trying again.",
+          );
+          return;
+        }
+
+        if (!arrivalResult.arrivalConfirmed) {
+          setCallError(
+            arrivalResult.errorMessage ??
+              "Unable to confirm your check-in right now. Please try again.",
+          );
+          return;
+        }
+
+        if (!isSessionStarted(latestSession)) {
+          logArrivalIntent(
+            "voice_waiting_for_other_participant",
+            buildArrivalIntentLogPayload(latestSession, "voice", false),
+          );
+          setVoiceCallStatus("idle");
+          setCallError(
+            "You are checked in. Voice will unlock once the other participant arrives.",
+          );
+          return;
+        }
+      }
+
+      const voiceBlockedReason = getChatBlockedReason(
+        latestSession,
+        currentParticipantRole,
+      );
+      if (voiceBlockedReason) {
+        logArrivalAudit("voice_blocked_not_started", {
+          sessionId: latestSession?.id ?? sessionRecord.id,
+          activeSessionId,
+          status: latestSession?.status ?? sessionRecord.status,
+          patientJoinedAt: latestSession?.patientJoinedAt ?? sessionRecord.patientJoinedAt,
+          therapistJoinedAt:
+            latestSession?.therapistJoinedAt ?? sessionRecord.therapistJoinedAt,
+          sessionStartedAt:
+            latestSession?.sessionStartedAt ?? sessionRecord.sessionStartedAt,
+          route,
+          triggerSource: "voice",
+        });
+        logChatLifecycleRecheck("voice_connect_blocked", {
+          routeSessionId: activeSessionId,
+          loadedSessionId: latestSession?.id ?? null,
+          voiceConnectAllowed: false,
+          blockedReason: voiceBlockedReason,
+        });
+        logChatLifecycle("handle_start_voice_call_gate_evaluated", {
+          voiceConnectAllowed: false,
+          blockedReason: voiceBlockedReason,
+        });
+        setVoiceCallStatus("idle");
+        setCallError(
+          getPreStartSessionMessage(latestSession, currentParticipantRole),
+        );
+        return;
+      }
+
+      logArrivalIntent(
+        "voice_connect_allowed",
+        buildArrivalIntentLogPayload(latestSession, "voice", false),
+      );
+      logArrivalAudit("voice_allowed_started", {
+        sessionId: latestSession?.id ?? sessionRecord.id,
+        activeSessionId,
+        status: latestSession?.status ?? sessionRecord.status,
+        patientJoinedAt: latestSession?.patientJoinedAt ?? sessionRecord.patientJoinedAt,
+        therapistJoinedAt:
+          latestSession?.therapistJoinedAt ?? sessionRecord.therapistJoinedAt,
+        sessionStartedAt:
+          latestSession?.sessionStartedAt ?? sessionRecord.sessionStartedAt,
+        route,
+        triggerSource: "voice",
+      });
+      logChatLifecycleRecheck("voice_connect_allowed", {
+        routeSessionId: activeSessionId,
+        loadedSessionId: latestSession?.id ?? null,
+        voiceConnectAllowed: true,
+        allowedReason: "session_started_verified",
+      });
+      logChatLifecycle("handle_start_voice_call_gate_evaluated", {
+        voiceConnectAllowed: true,
+        allowedReason: "session_started_verified",
+      });
       await startLocalAudio();
       setVoiceCallStatus("connected");
-      await recordCurrentParticipantArrival(supabase);
     } catch (error) {
       setCallError(
         error instanceof Error ? error.message : "Unable to start voice call.",
@@ -1622,19 +2529,331 @@ function ChatRoomPage() {
     router.replace(isTherapist ? "/provider-lobby" : "/dashboard");
   };
 
-  const syncLatestSessionState = (row: Record<string, unknown> | null) => {
+  const refreshLatestSessionRow = async (client: NonNullable<typeof supabase>) => {
+    if (!activeSessionId) {
+      return null;
+    }
+
+    const { data, error } = await client
+      .from("sessions")
+      .select("*")
+      .eq("id", activeSessionId)
+      .maybeSingle();
+
+    if (error) {
+      console.error("Failed to refresh latest chat session", error);
+      return null;
+    }
+
+    return syncLatestSessionState(
+      data as Record<string, unknown> | null,
+      "refresh_latest_session_row",
+    );
+  };
+
+  const refreshLatestSessionRowForRecheck = async (
+    client: NonNullable<typeof supabase>,
+    source: string,
+  ) => {
+    const latestSession = await refreshLatestSessionRow(client);
+    logChatLifecycleRecheck("refreshed_session_snapshot", {
+      source,
+      routeSessionId: activeSessionId,
+      loadedSessionId: latestSession?.id ?? null,
+      status: latestSession?.status ?? null,
+      patientJoinedAt: latestSession?.patientJoinedAt ?? null,
+      therapistJoinedAt: latestSession?.therapistJoinedAt ?? null,
+      sessionStartedAt: latestSession?.sessionStartedAt ?? null,
+      noShowDeadlineAt: latestSession?.noShowDeadlineAt ?? null,
+    });
+    return latestSession;
+  };
+
+  const buildArrivalIntentLogPayload = (
+    session: SessionRecord | null,
+    triggerSource: "send" | "voice",
+    willAttemptArrival: boolean,
+  ) => ({
+    sessionId: session?.id ?? activeSessionId,
+    activeSessionId,
+    status: session?.status ?? null,
+    patientJoinedAt: session?.patientJoinedAt ?? null,
+    therapistJoinedAt: session?.therapistJoinedAt ?? null,
+    sessionStartedAt: session?.sessionStartedAt ?? null,
+    triggerSource,
+    currentParticipantRole,
+    willAttemptArrival,
+  });
+
+  const buildSessionEndArrivalAuditPayload = (
+    session: SessionRecord | null,
+    handlerName:
+      | "handleRequestSessionEnd"
+      | "handleDeclineSessionEndRequest"
+      | "handleAcceptSessionEndRequest",
+  ) => ({
+    sessionId: session?.id ?? activeSessionId,
+    activeSessionId,
+    status: session?.status ?? null,
+    patientJoinedAt: session?.patientJoinedAt ?? null,
+    therapistJoinedAt: session?.therapistJoinedAt ?? null,
+    sessionStartedAt: session?.sessionStartedAt ?? null,
+    route: "/chat",
+    handlerName,
+  });
+
+  const applySessionRecord = (
+    nextSession: SessionRecord,
+    triggerSource: string,
+  ) => {
+    setSessionRecord((current) => {
+      if (
+        current &&
+        current.status !== nextSession.status &&
+        nextSession.status === "in_session"
+      ) {
+        logChatLifecycleRecheck("session_transition_detected", {
+          previousStatus: current.status,
+          nextStatus: nextSession.status,
+          patientJoinedAt: nextSession.patientJoinedAt,
+          therapistJoinedAt: nextSession.therapistJoinedAt,
+          sessionStartedAt: nextSession.sessionStartedAt,
+          triggerSource,
+        });
+        logChatLifecycle("session_transition_detected", {
+          previousStatus: current.status,
+          nextStatus: nextSession.status,
+          patientJoinedAt: nextSession.patientJoinedAt,
+          therapistJoinedAt: nextSession.therapistJoinedAt,
+          sessionStartedAt: nextSession.sessionStartedAt,
+          triggerSource,
+        });
+      }
+
+      return nextSession;
+    });
+    return nextSession;
+  };
+
+  const syncLatestSessionState = (
+    row: Record<string, unknown> | null,
+    triggerSource = "session_sync",
+  ) => {
     if (!row || !activeSessionId) {
       return null;
     }
 
     const latestSession = normalizeSessionRecord(row, activeSessionId);
-    setSessionRecord(latestSession);
-    return latestSession;
+    return applySessionRecord(latestSession, triggerSource);
+  };
+
+  const attemptArrivalFromIntent = async (
+    client: NonNullable<typeof supabase>,
+    latestSession: SessionRecord,
+    triggerSource: "send" | "voice",
+  ) => {
+    if (arrivalIntentInFlightRef.current) {
+      return {
+        latestSession,
+        arrivalAttempted: false,
+        arrivalConfirmed: false,
+        blockedByPending: true,
+        errorMessage:
+          "Check-in is already pending in your wallet. Confirm or reject it before trying again.",
+      };
+    }
+
+    arrivalIntentInFlightRef.current = true;
+    setPendingArrivalTrigger(triggerSource);
+    logArrivalIntent(
+      triggerSource === "send" ? "send_arrival_started" : "voice_arrival_started",
+      buildArrivalIntentLogPayload(latestSession, triggerSource, true),
+    );
+
+    try {
+      await recordCurrentParticipantArrival(client, latestSession, {
+        throwOnFailure: true,
+      });
+
+      const refreshedSession =
+        (await refreshLatestSessionRowForRecheck(
+          client,
+          `${triggerSource}_arrival_intent_refresh`,
+        )) ?? latestSession;
+      const currentParticipantJoined = hasCurrentParticipantCheckedIn(
+        refreshedSession,
+        currentParticipantRole,
+      );
+
+      if (currentParticipantJoined) {
+        logArrivalIntent(
+          triggerSource === "send"
+            ? "send_arrival_succeeded"
+            : "voice_arrival_succeeded",
+          buildArrivalIntentLogPayload(refreshedSession, triggerSource, false),
+        );
+        return {
+          latestSession: refreshedSession,
+          arrivalAttempted: true,
+          arrivalConfirmed: true,
+          blockedByPending: false,
+          errorMessage: null,
+        };
+      }
+
+      logArrivalIntent(
+        triggerSource === "send" ? "send_arrival_failed" : "voice_arrival_failed",
+        {
+          ...buildArrivalIntentLogPayload(refreshedSession, triggerSource, false),
+          reason: "arrival_not_persisted",
+        },
+      );
+      return {
+        latestSession: refreshedSession,
+        arrivalAttempted: true,
+        arrivalConfirmed: false,
+        blockedByPending: false,
+        errorMessage:
+          "Check-in was not confirmed. Your draft is still saved. Please try again.",
+      };
+    } catch (error) {
+      logArrivalIntent(
+        triggerSource === "send" ? "send_arrival_failed" : "voice_arrival_failed",
+        {
+          ...buildArrivalIntentLogPayload(latestSession, triggerSource, false),
+          reason:
+            error instanceof Error ? error.message : "arrival_check_in_failed",
+        },
+      );
+      return {
+        latestSession,
+        arrivalAttempted: true,
+        arrivalConfirmed: false,
+        blockedByPending: false,
+        errorMessage:
+          error instanceof Error
+            ? error.message
+            : "Unable to confirm your check-in right now. Please try again.",
+      };
+    } finally {
+      arrivalIntentInFlightRef.current = false;
+      setPendingArrivalTrigger(null);
+    }
+  };
+
+  const getEscrowSessionContext = (session: SessionRecord) => {
+    if (!effectiveWallet || accountStatus !== "connected" || !address) {
+      throw new Error("Connect your wallet before ending the session.");
+    }
+
+    if (chainId !== MINDPASS_ESCROW_CHAIN_ID) {
+      throw new Error("Switch to Sepolia before ending the session.");
+    }
+
+    const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+    if (!contractAddress) {
+      throw new Error(
+        "The MindPass escrow contract is not configured in this app.",
+      );
+    }
+
+    if (!session.onchainSessionId) {
+      throw new Error("This session is missing an on-chain session id.");
+    }
+
+    let onchainSessionId: bigint;
+    try {
+      onchainSessionId = BigInt(session.onchainSessionId);
+    } catch {
+      throw new Error("This session has an invalid on-chain session id.");
+    }
+
+    return {
+      contractAddress,
+      onchainSessionId,
+    };
+  };
+
+  const runEscrowWrite = async (
+    request:
+      | ReturnType<typeof prepareRequestSessionEnd>
+      | ReturnType<typeof prepareConfirmSessionEnd>,
+  ) => {
+    let hash: `0x${string}`;
+    logEscrowDebug("submitting session-end escrow write", {
+      source: "chat",
+      sessionId: activeSessionId,
+      onchainSessionId: request.args[0]?.toString?.() ?? null,
+      functionName: request.functionName,
+    });
+
+    if (request.functionName === "requestSessionEnd") {
+      hash = await writeContract(wagmiConfig, {
+        address: request.address,
+        abi: request.abi,
+        functionName: "requestSessionEnd",
+        args: request.args,
+        chainId: request.chainId,
+      });
+    } else if (request.functionName === "confirmSessionEnd") {
+      hash = await writeContract(wagmiConfig, {
+        address: request.address,
+        abi: request.abi,
+        functionName: "confirmSessionEnd",
+        args: request.args,
+        chainId: request.chainId,
+      });
+    } else {
+      throw new Error("Unsupported session end contract call.");
+    }
+
+    const receipt = await waitForTransactionReceipt(wagmiConfig, {
+      chainId: MINDPASS_ESCROW_CHAIN_ID,
+      hash,
+    });
+    logReceiptDecode({
+      context: "chat session-end receipt decoded",
+      txHash: receipt.transactionHash,
+      blockNumber: receipt.blockNumber,
+      logs: receipt.logs,
+    });
+    return receipt;
+  };
+
+  const getEscrowWriteErrorMessage = (
+    action: "request" | "confirm",
+    error: unknown,
+  ) => {
+    const fallback =
+      action === "request"
+        ? "Unable to send the end-session request on-chain. Please try again."
+        : "Unable to confirm the end-session request on-chain. Please try again.";
+
+    if (!(error instanceof Error)) {
+      return fallback;
+    }
+
+    const message = error.message.toLowerCase();
+    if (
+      message.includes("user rejected") ||
+      message.includes("user denied") ||
+      message.includes("rejected the request") ||
+      message.includes("4001")
+    ) {
+      return action === "request"
+        ? "Wallet signing was cancelled. The session is still live."
+        : "Wallet signing was cancelled. The session is still live.";
+    }
+
+    return error.message || fallback;
   };
 
   const recordCurrentParticipantArrival = async (
     client: NonNullable<typeof supabase>,
     sourceSession: SessionRecord | null = sessionRecord,
+    options?: {
+      throwOnFailure?: boolean;
+    },
   ) => {
     if (!activeSessionId || !sourceSession || !currentParticipantWallet) {
       return sourceSession;
@@ -1644,10 +2863,6 @@ function ChatRoomPage() {
       return sourceSession;
     }
 
-    const joinKey =
-      currentParticipantRole === "therapist"
-        ? "therapist_joined_at"
-        : "patient_joined_at";
     const alreadyJoined =
       currentParticipantRole === "therapist"
         ? sourceSession.therapistJoinedAt
@@ -1665,32 +2880,345 @@ function ChatRoomPage() {
       return sourceSession;
     }
 
-    const { data, error } = await client
-      .from("sessions")
-      .update({
-        [joinKey]: new Date().toISOString(),
-      })
-      .eq("id", activeSessionId)
-      .in("status", ["funded", "in_session"])
-      .is(joinKey, null)
-      .select("*")
-      .maybeSingle();
+    if (!address || accountStatus !== "connected" || !effectiveWallet) {
+      return sourceSession;
+    }
+
+    if (address.toLowerCase() !== currentParticipantWallet.toLowerCase()) {
+      return sourceSession;
+    }
+
+    if (chainId !== MINDPASS_ESCROW_CHAIN_ID) {
+      return sourceSession;
+    }
+
+    const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+    if (!contractAddress || !sourceSession.onchainSessionId) {
+      return sourceSession;
+    }
+
+    let onchainSessionId: bigint;
+    try {
+      onchainSessionId = BigInt(sourceSession.onchainSessionId);
+    } catch {
+      return sourceSession;
+    }
+
+    const request =
+      currentParticipantRole === "therapist"
+        ? prepareCheckInAsTherapist({
+            address: contractAddress,
+            sessionId: onchainSessionId,
+          })
+        : prepareCheckInAsPatient({
+            address: contractAddress,
+            sessionId: onchainSessionId,
+          });
+
+    let hash: `0x${string}`;
+    try {
+      logEscrowDebug("submitting session check-in", {
+        source: "chat",
+        sessionId: activeSessionId,
+        onchainSessionId: sourceSession.onchainSessionId,
+        functionName: request.functionName,
+      });
+      if (request.functionName === "checkInAsTherapist") {
+        hash = await writeContract(wagmiConfig, {
+          address: request.address,
+          abi: request.abi,
+          functionName: "checkInAsTherapist",
+          args: request.args,
+          chainId: request.chainId,
+        });
+      } else {
+        hash = await writeContract(wagmiConfig, {
+          address: request.address,
+          abi: request.abi,
+          functionName: "checkInAsPatient",
+          args: request.args,
+          chainId: request.chainId,
+        });
+      }
+    } catch (error) {
+      console.error("Failed to submit session check-in", error);
+      if (options?.throwOnFailure) {
+        throw error instanceof Error
+          ? error
+          : new Error("Unable to submit session check-in.");
+      }
+      return sourceSession;
+    }
+
+    let receipt;
+    try {
+      receipt = await waitForTransactionReceipt(wagmiConfig, {
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+        hash,
+      });
+      logReceiptDecode({
+        context: "chat check-in receipt decoded",
+        txHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+        logs: receipt.logs,
+      });
+    } catch (error) {
+      console.error("Failed to confirm session check-in", error);
+      if (options?.throwOnFailure) {
+        throw error instanceof Error
+          ? error
+          : new Error("Unable to confirm session check-in.");
+      }
+      return sourceSession;
+    }
+
+    const checkedInEvent = findMindPassEscrowEvent(
+      receipt.logs,
+      currentParticipantRole === "therapist"
+        ? "TherapistCheckedIn"
+        : "PatientCheckedIn",
+    );
+    const sessionStartedEvent = findMindPassEscrowEvent(
+      receipt.logs,
+      "SessionStarted",
+    );
+    logCheckinMirrorFix("receipt_decoded_events", {
+      sessionId: activeSessionId,
+      onchainSessionId: sourceSession.onchainSessionId,
+      statusBefore: sourceSession.status,
+      currentParticipantRole,
+      checkedInEventFound: Boolean(checkedInEvent),
+      sessionStartedEventFound: Boolean(sessionStartedEvent),
+      txHash: receipt.transactionHash,
+    });
+
+    if (!checkedInEvent) {
+      console.error("Check-in transaction succeeded without a check-in event");
+      if (options?.throwOnFailure) {
+        throw new Error(
+          "Check-in transaction succeeded, but the check-in event was missing.",
+        );
+      }
+      return sourceSession;
+    }
+
+    const updatePatch = {
+      ...(currentParticipantRole === "therapist"
+        ? buildTherapistCheckedInPatch({
+            checkedInAt: checkedInEvent.args.checkedInAt,
+            contractAddress,
+            chainId: MINDPASS_ESCROW_CHAIN_ID,
+            txHash: receipt.transactionHash,
+            blockNumber: receipt.blockNumber,
+          })
+        : buildPatientCheckedInPatch({
+            checkedInAt: checkedInEvent.args.checkedInAt,
+            contractAddress,
+            chainId: MINDPASS_ESCROW_CHAIN_ID,
+            txHash: receipt.transactionHash,
+            blockNumber: receipt.blockNumber,
+          })),
+      ...(sessionStartedEvent
+        ? buildSessionStartedPatch({
+            sessionStartedAt: sessionStartedEvent.args.sessionStartedAt,
+            contractAddress,
+            chainId: MINDPASS_ESCROW_CHAIN_ID,
+            txHash: receipt.transactionHash,
+            blockNumber: receipt.blockNumber,
+          })
+        : {}),
+    };
+
+    const applyCheckInMirrorPatch = async (
+      patch: Record<string, unknown>,
+      source: "receipt_patch" | "chain_fallback_patch",
+      useStatusFilter: boolean,
+    ) => {
+      let query = client
+        .from("sessions")
+        .update(patch)
+        .eq("id", activeSessionId)
+        .eq("onchain_session_id", sourceSession.onchainSessionId);
+
+      if (useStatusFilter) {
+        query = query.in("status", ["funded", "in_session"]);
+      }
+
+      logCheckinMirrorFix("final_patch_applied", {
+        sessionId: activeSessionId,
+        onchainSessionId: sourceSession.onchainSessionId,
+        statusBefore: sourceSession.status,
+        source,
+        useStatusFilter,
+        patchKeys: Object.keys(patch),
+        txHash: receipt.transactionHash,
+      });
+
+      const { data, error } = await query.select("*").maybeSingle();
+      if (error) {
+        logCheckinMirrorFix("supabase_update_failure", {
+          sessionId: activeSessionId,
+          onchainSessionId: sourceSession.onchainSessionId,
+          statusBefore: sourceSession.status,
+          source,
+          txHash: receipt.transactionHash,
+          message: error.message,
+        });
+      } else {
+        logCheckinMirrorFix("supabase_update_success", {
+          sessionId: activeSessionId,
+          onchainSessionId: sourceSession.onchainSessionId,
+          statusBefore: sourceSession.status,
+          statusAfter:
+            data && typeof data === "object" && "status" in data
+              ? String(data.status ?? "")
+              : null,
+          source,
+          txHash: receipt.transactionHash,
+          matchedRow: Boolean(data),
+        });
+      }
+
+      return { data, error };
+    };
+
+    const buildFallbackPatchFromChainSession = (
+      chainSession: ReturnType<typeof normalizeMindPassEscrowSession>,
+    ) => {
+      const fallbackPatch: Record<string, unknown> = {
+        ...(chainSession.patientJoinedAt > 0n
+          ? {
+              patient_joined_at:
+                unixSecondsToIsoString(chainSession.patientJoinedAt) ?? undefined,
+            }
+          : {}),
+        ...(chainSession.therapistJoinedAt > 0n
+          ? {
+              therapist_joined_at:
+                unixSecondsToIsoString(chainSession.therapistJoinedAt) ?? undefined,
+            }
+          : {}),
+        ...(currentParticipantRole === "therapist"
+          ? buildTherapistCheckedInPatch({
+              checkedInAt: chainSession.therapistJoinedAt,
+              contractAddress,
+              chainId: MINDPASS_ESCROW_CHAIN_ID,
+              txHash: receipt.transactionHash,
+              blockNumber: receipt.blockNumber,
+            })
+          : buildPatientCheckedInPatch({
+              checkedInAt: chainSession.patientJoinedAt,
+              contractAddress,
+              chainId: MINDPASS_ESCROW_CHAIN_ID,
+              txHash: receipt.transactionHash,
+              blockNumber: receipt.blockNumber,
+            })),
+        ...(chainSession.sessionStartedAt > 0n
+          ? buildSessionStartedPatch({
+              sessionStartedAt: chainSession.sessionStartedAt,
+              contractAddress,
+              chainId: MINDPASS_ESCROW_CHAIN_ID,
+              txHash: receipt.transactionHash,
+              blockNumber: receipt.blockNumber,
+            })
+          : {}),
+      };
+
+      return fallbackPatch;
+    };
+
+    const recoverCheckInMirrorFromChain = async (reason: string) => {
+      const chainSession = normalizeMindPassEscrowSession(
+        (await readContract(wagmiConfig, {
+          address: contractAddress,
+          abi: MINDPASS_ESCROW_ABI,
+          functionName: "sessions",
+          args: [onchainSessionId],
+          chainId: MINDPASS_ESCROW_CHAIN_ID,
+        })) as readonly unknown[],
+      );
+
+      logCheckinMirrorFix("fallback_chain_session_read", {
+        sessionId: activeSessionId,
+        onchainSessionId: sourceSession.onchainSessionId,
+        statusBefore: sourceSession.status,
+        chainStatus: chainSession.status,
+        patientJoinedAt: chainSession.patientJoinedAt.toString(),
+        therapistJoinedAt: chainSession.therapistJoinedAt.toString(),
+        sessionStartedAt: chainSession.sessionStartedAt.toString(),
+        txHash: receipt.transactionHash,
+        reason,
+      });
+
+      const fallbackPatch = buildFallbackPatchFromChainSession(chainSession);
+      return applyCheckInMirrorPatch(
+        fallbackPatch,
+        "chain_fallback_patch",
+        false,
+      );
+    };
+
+    let { data, error } = await applyCheckInMirrorPatch(
+      updatePatch,
+      "receipt_patch",
+      true,
+    );
 
     if (error) {
-      console.error("Failed to record first in-session arrival", error);
-      return sourceSession;
+      logMirrorSyncError("chat check-in mirror sync failed", {
+        sessionId: activeSessionId,
+        onchainSessionId: sourceSession.onchainSessionId,
+        txHash: receipt.transactionHash,
+        message: error.message,
+      });
+      const fallbackResult = await recoverCheckInMirrorFromChain(
+        "initial_supabase_update_failed",
+      );
+      data = fallbackResult.data;
+      error = fallbackResult.error;
+      if (error) {
+        return sourceSession;
+      }
     }
 
     if (!data) {
-      return sourceSession;
+      const fallbackResult = await recoverCheckInMirrorFromChain(
+        "initial_supabase_update_matched_no_row",
+      );
+      data = fallbackResult.data;
+      if (!data) {
+        return sourceSession;
+      }
     }
 
-    const nextSession = normalizeSessionRecord(
+    let nextSession = normalizeSessionRecord(
       data as Record<string, unknown>,
       activeSessionId,
     );
-    setSessionRecord(nextSession);
-    return nextSession;
+
+    if (
+      nextSession.status === "funded" &&
+      !sessionStartedEvent
+    ) {
+      const fallbackResult = await recoverCheckInMirrorFromChain(
+        "receipt_missing_session_started_event_or_db_still_funded",
+      );
+
+      if (fallbackResult.data) {
+        nextSession = normalizeSessionRecord(
+          fallbackResult.data as Record<string, unknown>,
+          activeSessionId,
+        );
+      }
+    }
+
+    logMirrorSync("chat check-in mirror sync complete", {
+      sessionId: activeSessionId,
+      onchainSessionId: sourceSession.onchainSessionId,
+      txHash: receipt.transactionHash,
+      status: nextSession.status,
+    });
+    return applySessionRecord(nextSession, "record_current_participant_arrival");
   };
 
   const handleStaleCompletionState = (
@@ -1735,63 +3263,41 @@ function ChatRoomPage() {
     setErrorMessage("This session changed state. Please review the latest status.");
   };
 
-  const finalizeSessionCompletion = async (
+  const syncCompletedSessionFromChain = async (
     client: NonNullable<typeof supabase>,
+    contractAddress: HexAddress,
+    txHash: `0x${string}`,
+    blockNumber: bigint,
+    completionValues: CompletedSessionSyncValues | null,
     setErrorMessage: (message: string) => void,
   ) => {
     if (!activeSessionId) {
       return false;
     }
 
-    const { data: latestRow, error: latestError } = await client
-      .from("sessions")
-      .select("*")
-      .eq("id", activeSessionId)
-      .maybeSingle();
-
-    if (latestError) {
-      console.error("Failed to verify latest session before completion", latestError);
-      setErrorMessage("Unable to verify the latest session state. Please try again.");
-      return false;
+    if (!completionValues) {
+      logEscrowDebug("SessionCompleted event missing from confirmSessionEnd receipt", {
+        sessionId: activeSessionId,
+        txHash,
+      });
     }
 
-    const latestSession = syncLatestSessionState(
-      latestRow as Record<string, unknown> | null,
-    );
+    const completionPatch = buildSessionCompletedPatch({
+      therapistPayoutWei:
+        completionValues?.therapistPayoutWei ?? NORMAL_THERAPIST_PAYOUT_WEI,
+      protocolFeeWei:
+        completionValues?.protocolFeeWei ?? NORMAL_PROTOCOL_FEE_WEI,
+      completedAt:
+        completionValues?.completedAt ?? BigInt(Math.floor(Date.now() / 1000)),
+      contractAddress,
+      chainId: MINDPASS_ESCROW_CHAIN_ID,
+      txHash,
+      blockNumber,
+    });
 
-    if (!latestSession) {
-      setErrorMessage("This session is no longer live.");
-      return false;
-    }
-
-    const terminalOutcome = getTerminalSessionOutcomeOrNull(
-      latestSession.status,
-      isTherapist,
-    );
-    if (terminalOutcome) {
-      stopLocalAudio();
-      setVoiceCallStatus("idle");
-      resetCompletionModal();
-      setTerminalSessionOutcome(terminalOutcome);
-      return true;
-    }
-
-    if (!canCompleteSession(latestSession)) {
-      handleStaleCompletionState(latestSession, setErrorMessage);
-      return false;
-    }
-
-    const now = new Date().toISOString();
     const { data, error } = await client
       .from("sessions")
-      .update({
-        status: "completed",
-        completed_at: now,
-        protocol_fee_eth: PLATFORM_FEE_ETH,
-        therapist_payout_eth: NORMAL_THERAPIST_PAYOUT_ETH,
-        refund_amount_eth: 0,
-        settlement_status: "released_to_therapist",
-      })
+      .update(completionPatch)
       .eq("id", activeSessionId)
       .eq("status", "in_session")
       .eq("settlement_status", "held_in_escrow")
@@ -1800,35 +3306,36 @@ function ChatRoomPage() {
       .maybeSingle();
 
     if (error) {
-      console.error("Failed to complete session", error);
-      setErrorMessage("Unable to complete this session right now. Please try again.");
+      logMirrorSyncError("chat completion mirror sync failed", {
+        sessionId: activeSessionId,
+        txHash,
+        message: error.message,
+      });
+      setErrorMessage(
+        "The on-chain session end succeeded, but the session record could not be synced. Please refresh.",
+      );
+      await refreshLatestSessionRow(client);
       return false;
     }
 
     if (!data) {
-      const { data: refreshedRow, error: refreshError } = await client
-        .from("sessions")
-        .select("*")
-        .eq("id", activeSessionId)
-        .maybeSingle();
-
-      if (refreshError) {
-        console.error("Failed to refresh latest session after stale completion", refreshError);
-        setErrorMessage("This session changed state. Please review the latest status.");
-        return false;
-      }
-
-      handleStaleCompletionState(
-        syncLatestSessionState(refreshedRow as Record<string, unknown> | null),
-        setErrorMessage,
+      setErrorMessage(
+        "The on-chain session end succeeded, but the session record could not be synced. Please refresh.",
       );
+      await refreshLatestSessionRow(client);
       return false;
     }
 
     stopLocalAudio();
     setVoiceCallStatus("idle");
-    setSessionRecord(
+    logMirrorSync("chat completion mirror sync complete", {
+      sessionId: activeSessionId,
+      txHash,
+      status: "completed",
+    });
+    applySessionRecord(
       normalizeSessionRecord(data as Record<string, unknown>, activeSessionId),
+      "completion_sync",
     );
     setSessionEndRequestError("");
     resetCompletionModal();
@@ -1868,6 +3375,14 @@ function ChatRoomPage() {
 
       const latestSession = syncLatestSessionState(
         latestRow as Record<string, unknown> | null,
+        "verify_latest_session_before_end_request",
+      );
+      logSessionEndArrivalAudit(
+        "session_end_request_entered",
+        buildSessionEndArrivalAuditPayload(
+          latestSession,
+          "handleRequestSessionEnd",
+        ),
       );
 
       if (!latestSession) {
@@ -1889,6 +3404,18 @@ function ChatRoomPage() {
 
       if (!canCompleteSession(latestSession)) {
         handleStaleCompletionState(latestSession);
+        return;
+      }
+
+      let escrowSessionContext;
+      try {
+        escrowSessionContext = getEscrowSessionContext(latestSession);
+      } catch (error) {
+        setCompletionModalError(
+          error instanceof Error
+            ? error.message
+            : "Unable to prepare the on-chain end request.",
+        );
         return;
       }
 
@@ -1933,6 +3460,13 @@ function ChatRoomPage() {
         return;
       }
 
+      await runEscrowWrite(
+        prepareRequestSessionEnd({
+          address: escrowSessionContext.contractAddress,
+          sessionId: escrowSessionContext.onchainSessionId,
+        }),
+      );
+
       const targetWallet = isTherapist
         ? latestSession.patientWallet
         : latestSession.therapistWallet;
@@ -1958,7 +3492,10 @@ function ChatRoomPage() {
         .single();
 
       if (error) {
-        console.error("Failed to create session end request", error);
+        console.error(
+          "Failed to sync session end request after on-chain request",
+          error,
+        );
 
         if (error.code === "23505") {
           const { data: pendingRow, error: pendingRefreshError } = await client
@@ -1993,13 +3530,21 @@ function ChatRoomPage() {
         }
 
         setCompletionModalError(
-          "Unable to send the end-session request right now. Please try again.",
+          "The on-chain end request succeeded, but the request record could not be synced. Please refresh.",
         );
+        await refreshLatestSessionRow(client);
         return;
       }
 
       if (data) {
-        await recordCurrentParticipantArrival(client, latestSession);
+        logSessionEndArrivalAudit(
+          "session_end_request_arrival_removed",
+          buildSessionEndArrivalAuditPayload(
+            latestSession,
+            "handleRequestSessionEnd",
+          ),
+        );
+        await refreshLatestSessionRow(client);
         setSessionEndRequest(
           normalizeSessionEndRequestRow(data as Record<string, unknown>),
         );
@@ -2007,10 +3552,8 @@ function ChatRoomPage() {
 
       resetCompletionModal();
     } catch (error) {
-      console.error("Failed to create session end request", error);
-      setCompletionModalError(
-        "Unable to send the end-session request right now. Please try again.",
-      );
+      console.error("Failed to request session end on-chain", error);
+      setCompletionModalError(getEscrowWriteErrorMessage("request", error));
     } finally {
       setIsCompletionSubmitting(false);
     }
@@ -2031,6 +3574,13 @@ function ChatRoomPage() {
     setCompletionModalError("");
 
     try {
+      logSessionEndArrivalAudit(
+        "session_end_decline_entered",
+        buildSessionEndArrivalAuditPayload(
+          sessionRecord,
+          "handleDeclineSessionEndRequest",
+        ),
+      );
       const now = new Date().toISOString();
       const { data, error } = await client
         .from("session_end_requests")
@@ -2058,7 +3608,14 @@ function ChatRoomPage() {
         return;
       }
 
-      await recordCurrentParticipantArrival(client);
+      logSessionEndArrivalAudit(
+        "session_end_decline_arrival_removed",
+        buildSessionEndArrivalAuditPayload(
+          sessionRecord,
+          "handleDeclineSessionEndRequest",
+        ),
+      );
+      await refreshLatestSessionRow(client);
       setSessionEndRequest(
         normalizeSessionEndRequestRow(data as Record<string, unknown>),
       );
@@ -2090,6 +3647,94 @@ function ChatRoomPage() {
     setSessionEndRequestError("");
 
     try {
+      const { data: latestRow, error: latestError } = await client
+        .from("sessions")
+        .select("*")
+        .eq("id", activeSessionId)
+        .maybeSingle();
+
+      if (latestError) {
+        console.error("Failed to verify latest session before accept", latestError);
+        setCompletionModalError(
+          "Unable to verify the latest session state. Please try again.",
+        );
+        return;
+      }
+
+      const latestSession = syncLatestSessionState(
+        latestRow as Record<string, unknown> | null,
+        "verify_latest_session_before_accept",
+      );
+      logSessionEndArrivalAudit(
+        "session_end_accept_entered",
+        buildSessionEndArrivalAuditPayload(
+          latestSession,
+          "handleAcceptSessionEndRequest",
+        ),
+      );
+
+      if (!latestSession) {
+        setCompletionModalError("This session is no longer live.");
+        return;
+      }
+
+      const terminalOutcome = getTerminalSessionOutcomeOrNull(
+        latestSession.status,
+        isTherapist,
+      );
+      if (terminalOutcome) {
+        stopLocalAudio();
+        setVoiceCallStatus("idle");
+        resetCompletionModal();
+        setTerminalSessionOutcome(terminalOutcome);
+        return;
+      }
+
+      if (!canCompleteSession(latestSession)) {
+        handleStaleCompletionState(latestSession);
+        return;
+      }
+
+      const { data: pendingRow, error: pendingError } = await client
+        .from("session_end_requests")
+        .select("*")
+        .eq("id", pendingSessionEndRequest.id)
+        .eq("status", "pending")
+        .maybeSingle();
+
+      if (pendingError) {
+        console.error("Failed to verify pending session end request", pendingError);
+        setCompletionModalError(
+          "Unable to verify the current end-session state. Please try again.",
+        );
+        return;
+      }
+
+      if (!pendingRow) {
+        setCompletionModalError("This end-session request is no longer pending.");
+        setSessionEndRequestRefreshNonce((current) => current + 1);
+        return;
+      }
+
+      let escrowSessionContext;
+      try {
+        escrowSessionContext = getEscrowSessionContext(latestSession);
+      } catch (error) {
+        setCompletionModalError(
+          error instanceof Error
+            ? error.message
+            : "Unable to prepare the on-chain confirmation.",
+        );
+        return;
+      }
+
+      const receipt = await runEscrowWrite(
+        prepareConfirmSessionEnd({
+          address: escrowSessionContext.contractAddress,
+          sessionId: escrowSessionContext.onchainSessionId,
+        }),
+      );
+
       const now = new Date().toISOString();
       const { data, error } = await client
         .from("session_end_requests")
@@ -2105,15 +3750,22 @@ function ChatRoomPage() {
         .maybeSingle();
 
       if (error) {
-        console.error("Failed to accept session end request", error);
-        setCompletionModalError(
-          "Unable to accept this end-session request right now. Please try again.",
+        console.error(
+          "Failed to sync accepted session end request after on-chain confirm",
+          error,
         );
+        setCompletionModalError(
+          "The on-chain session end succeeded, but the end request record could not be synced. Please refresh.",
+        );
+        await refreshLatestSessionRow(client);
         return;
       }
 
       if (!data) {
-        setCompletionModalError("This end-session request is no longer pending.");
+        setCompletionModalError(
+          "The on-chain session end succeeded, but the end request record could not be synced. Please refresh.",
+        );
+        await refreshLatestSessionRow(client);
         setSessionEndRequestRefreshNonce((current) => current + 1);
         return;
       }
@@ -2121,47 +3773,45 @@ function ChatRoomPage() {
       const acceptedRequest = normalizeSessionEndRequestRow(
         data as Record<string, unknown>,
       );
-      await recordCurrentParticipantArrival(client);
-      setSessionEndRequest(acceptedRequest);
-      resetCompletionModal();
-      finalizedEndRequestIdsRef.current.add(acceptedRequest.id);
-      await finalizeSessionCompletion(client, setSessionEndRequestError);
-    } catch (error) {
-      console.error("Failed to accept session end request", error);
-      setCompletionModalError(
-        "Unable to accept this end-session request right now. Please try again.",
+      const completionEvent = findMindPassEscrowEvent(
+        receipt.logs,
+        "SessionCompleted",
       );
+      const completionValues = completionEvent
+        ? {
+            therapistPayoutWei: completionEvent.args.therapistPayoutWei,
+            protocolFeeWei: completionEvent.args.protocolFeeWei,
+            completedAt: completionEvent.args.completedAt,
+          }
+        : null;
+      logSessionEndArrivalAudit(
+        "session_end_accept_arrival_removed",
+        buildSessionEndArrivalAuditPayload(
+          latestSession,
+          "handleAcceptSessionEndRequest",
+        ),
+      );
+      await refreshLatestSessionRow(client);
+      setSessionEndRequest(acceptedRequest);
+      const didSyncSession = await syncCompletedSessionFromChain(
+        client,
+        escrowSessionContext.contractAddress,
+        receipt.transactionHash,
+        receipt.blockNumber,
+        completionValues,
+        setSessionEndRequestError,
+      );
+
+      if (!didSyncSession) {
+        return;
+      }
+    } catch (error) {
+      console.error("Failed to confirm session end on-chain", error);
+      setCompletionModalError(getEscrowWriteErrorMessage("confirm", error));
     } finally {
       setIsCompletionSubmitting(false);
     }
   };
-
-  const finalizeAcceptedSessionEndRequest = useEffectEvent(() => {
-    if (!supabase) {
-      return;
-    }
-
-    void finalizeSessionCompletion(supabase, setSessionEndRequestError);
-  });
-
-  useEffect(() => {
-    if (
-      !supabase ||
-      !sessionEndRequest ||
-      sessionEndRequest.status !== "accepted" ||
-      !activeSessionId ||
-      terminalSessionOutcome
-    ) {
-      return;
-    }
-
-    if (finalizedEndRequestIdsRef.current.has(sessionEndRequest.id)) {
-      return;
-    }
-
-    finalizedEndRequestIdsRef.current.add(sessionEndRequest.id);
-    finalizeAcceptedSessionEndRequest();
-  }, [activeSessionId, sessionEndRequest, terminalSessionOutcome]);
 
   if (sessionGuard.authResolutionState === "pending" && !isRestoringChatSession) {
     return null;
@@ -2257,95 +3907,101 @@ function ChatRoomPage() {
   }
 
   return (
-    <main className="app-shell-subtle page-canvas page-canvas-violet relative overflow-hidden bg-background text-foreground">
-      <div className="fixed left-1/2 top-6 z-50 w-[calc(100%-2rem)] max-w-6xl -translate-x-1/2">
-        <header className="liquid-glass-floating flex items-center justify-between gap-4 rounded-full border border-black/[0.05] bg-white/70 px-5 py-3 backdrop-blur-[40px] backdrop-saturate-[1.8] dark:border-white/[0.08] dark:bg-[#1d1d1f]/70 sm:px-6">
-          <div className="min-w-0">
-            <div className="flex items-center gap-3">
-              <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_16px_rgba(74,222,128,0.85)]" />
-              <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-[var(--text-primary)] sm:text-base">
-                  {isTherapist
-                    ? `Patient: ${formatWalletLabel(sessionRecord?.patientWallet ?? "")}`
-                    : therapistProfile.name}
-                </p>
-                <div className="flex items-center gap-2">
-                  <p className="text-xs text-[var(--text-muted)]">
+    <main className="app-shell-subtle page-canvas page-canvas-violet relative h-[100dvh] overflow-hidden bg-background text-foreground">
+      <div className="mx-auto flex h-full w-full max-w-6xl flex-col overflow-hidden px-6 py-6 md:px-8">
+        <div className="pointer-events-none absolute inset-x-6 top-6 z-10 md:inset-x-8">
+          <header className="pointer-events-auto liquid-glass-floating chat-composer-surface flex flex-none items-center justify-between gap-4 rounded-full px-5 py-3 sm:px-6">
+            <div className="min-w-0">
+              <div className="flex items-center gap-3">
+                <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_16px_rgba(74,222,128,0.85)]" />
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-[var(--text-primary)] sm:text-base">
                     {isTherapist
-                      ? "Online"
-                      : isLoadingTherapist
-                        ? "Loading therapist..."
-                        : therapistProfile.specialty}
+                      ? `Patient: ${formatWalletLabel(sessionRecord?.patientWallet ?? "")}`
+                      : therapistProfile.name}
                   </p>
-                  {isTherapist ? (
-                    <span className="glass-chip-muted px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)]">
-                      Anonymous
-                    </span>
-                  ) : null}
+                  <div className="flex items-center gap-2">
+                    <p className="text-xs text-[var(--text-muted)]">
+                      {isTherapist
+                        ? "Online"
+                        : isLoadingTherapist
+                          ? "Loading therapist..."
+                          : therapistProfile.specialty}
+                    </p>
+                    {isTherapist ? (
+                      <span className="glass-chip-muted px-2 py-0.5 text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)]">
+                        Anonymous
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
 
-          <div className="hidden items-center gap-2 rounded-full border border-black/[0.05] bg-black/5 px-4 py-2 text-sm text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/10 md:flex">
-            <Lock className="h-4 w-4" />
-            <span>Wallet-Gated Session</span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <div className="rounded-full bg-black/5 px-3 py-1 font-mono text-sm text-[var(--text-secondary)] dark:bg-white/10">
-              {formatCountdown(secondsLeft)}
+            <div className="hidden items-center gap-2 rounded-full border border-black/[0.05] bg-black/5 px-4 py-2 text-sm text-[var(--text-secondary)] dark:border-white/[0.08] dark:bg-white/10 md:flex">
+              <Lock className="h-4 w-4" />
+              <span>Wallet-Gated Session</span>
             </div>
-            <VoiceCallControls
-              status={voiceCallStatus}
-              onAccept={handleStartVoiceCall}
-              onHangUp={handleHangUpVoiceCall}
-              ringingLabel={isTherapist ? "Calling patient..." : "Calling therapist..."}
-            />
-            {isTherapist ? (
-              <button
-                type="button"
-                onClick={handleOpenCompletionModal}
-                disabled={isEndSessionActionDisabled}
-                className={endSessionButtonClassName}
-              >
-                <span className="hidden sm:inline">
-                  {isRequesterWaitingForSessionEnd
-                    ? "Awaiting Patient Confirmation"
-                    : isAcceptedSessionEndFinalizing
-                      ? "Finalizing Session"
-                      : "Request Completion"}
-                </span>
-                <span className="sm:hidden">
-                  {isAcceptedSessionEndFinalizing ? "Ending" : "Request"}
-                </span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleOpenCompletionModal}
-                disabled={isEndSessionActionDisabled}
-                className={endSessionButtonClassName}
-              >
-                <span className="hidden sm:inline">
-                  {isRequesterWaitingForSessionEnd
-                    ? "Awaiting Therapist Confirmation"
-                    : isAcceptedSessionEndFinalizing
-                      ? "Finalizing Session"
-                      : "Request End Session"}
-                </span>
-                <span className="sm:hidden">
-                  {isAcceptedSessionEndFinalizing ? "Ending" : "Request"}
-                </span>
-              </button>
-            )}
-          </div>
-        </header>
-      </div>
 
-      <div className="mx-auto flex min-h-screen w-full max-w-5xl flex-col px-6 pb-36 pt-32 md:px-8 md:pb-40 md:pt-36">
-        <div className="flex-1 overflow-y-auto pb-6">
-        <div className="mx-auto flex w-full flex-col gap-4">
+            <div className="flex items-center gap-2">
+              <div className="rounded-full bg-black/5 px-3 py-1 text-right dark:bg-white/10">
+                <p className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)]">
+                  {countdownLabel}
+                </p>
+                <p className="font-mono text-sm text-[var(--text-secondary)]">
+                  {countdownValue}
+                </p>
+              </div>
+              <VoiceCallControls
+                status={voiceCallStatus}
+                onAccept={handleStartVoiceCall}
+                onHangUp={handleHangUpVoiceCall}
+                ringingLabel={isTherapist ? "Calling patient..." : "Calling therapist..."}
+              />
+              {isTherapist ? (
+                <button
+                  type="button"
+                  onClick={handleOpenCompletionModal}
+                  disabled={isEndSessionActionDisabled}
+                  className={endSessionButtonClassName}
+                >
+                  <span className="hidden sm:inline">
+                    {isRequesterWaitingForSessionEnd
+                      ? "Awaiting Patient Confirmation"
+                      : isAcceptedSessionEndFinalizing
+                        ? "Finalizing Session"
+                        : "Request Completion"}
+                  </span>
+                  <span className="sm:hidden">
+                    {isAcceptedSessionEndFinalizing ? "Ending" : "Request"}
+                  </span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleOpenCompletionModal}
+                  disabled={isEndSessionActionDisabled}
+                  className={endSessionButtonClassName}
+                >
+                  <span className="hidden sm:inline">
+                    {isRequesterWaitingForSessionEnd
+                      ? "Awaiting Therapist Confirmation"
+                      : isAcceptedSessionEndFinalizing
+                        ? "Finalizing Session"
+                        : "Request End Session"}
+                  </span>
+                  <span className="sm:hidden">
+                    {isAcceptedSessionEndFinalizing ? "Ending" : "Request"}
+                  </span>
+                </button>
+              )}
+            </div>
+          </header>
+        </div>
+
+        <div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col overflow-hidden relative">
+          <div className="flex-1 overflow-y-auto min-h-0 pb-28 pt-[5.5rem] md:pb-32">
+            <div className="mx-auto flex w-full flex-col gap-4">
             {callError ? (
               <div className="flex justify-center">
                 <div className="liquid-glass-soft max-w-2xl rounded-full px-5 py-3 text-center text-sm text-red-600 dark:text-red-300">
@@ -2371,6 +4027,58 @@ function ChatRoomPage() {
               <div className="flex justify-center">
                 <div className="liquid-glass-soft max-w-2xl rounded-full px-5 py-3 text-center text-sm text-red-600 dark:text-red-300">
                   {sessionEndRequestError}
+                </div>
+              </div>
+            ) : null}
+            {overdueResolutionError ? (
+              <div className="flex justify-center">
+                <div className="liquid-glass-soft max-w-2xl rounded-full px-5 py-3 text-center text-sm text-red-600 dark:text-red-300">
+                  {overdueResolutionError}
+                </div>
+              </div>
+            ) : null}
+            {!chatSessionStarted && sessionRecord?.status === "funded" ? (
+              <div className="flex justify-center">
+                <div className="glass-chip max-w-3xl rounded-[28px] px-5 py-4 text-center text-sm text-[var(--text-secondary)]">
+                  {preStartSessionMessage}
+                  {!currentParticipantJoinedAt ? (
+                    <span className="block pt-2 text-xs uppercase tracking-[0.16em] text-[var(--text-faint)]">
+                      Your first message or first call attempt counts as check-in.
+                    </span>
+                  ) : null}
+                  {currentParticipantJoinedAt && !otherParticipantJoinedAt ? (
+                    <span className="block pt-2 text-xs uppercase tracking-[0.16em] text-[var(--text-faint)]">
+                      Waiting for the other participant before the live session starts.
+                    </span>
+                  ) : null}
+                  {isPendingArrival ? (
+                    <span className="block pt-2 text-xs uppercase tracking-[0.16em] text-[var(--text-faint)]">
+                      Confirm the wallet request to finish check-in.
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+            {overdueResolutionKind ? (
+              <div className="flex justify-center">
+                <div className="liquid-glass-soft flex max-w-3xl flex-col items-center gap-3 rounded-[28px] px-5 py-4 text-center sm:flex-row sm:justify-between sm:text-left">
+                  <p className="text-sm text-[var(--text-secondary)]">
+                    {overdueResolutionKind === "payment_timeout"
+                      ? "The payment deadline has passed. Resolve the timeout on-chain to sync the final escrow outcome."
+                      : "The no-show deadline has passed. Resolve the no-show outcome on-chain to sync the final settlement."}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void handleResolveOverdueSession()}
+                    disabled={isResolvingOverdueSession}
+                    className="button-primary rounded-full px-5 py-3 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isResolvingOverdueSession
+                      ? "Resolving..."
+                      : overdueResolutionKind === "payment_timeout"
+                        ? "Resolve Timeout"
+                        : "Resolve No-Show"}
+                  </button>
                 </div>
               </div>
             ) : null}
@@ -2404,7 +4112,7 @@ function ChatRoomPage() {
                 </div>
               </div>
             ) : null}
-            {renderedMessages.map((message) => {
+            {visibleMessages.map((message) => {
               if (message.role === "system") {
                 return (
                   <div key={message.id} className="flex justify-center">
@@ -2454,36 +4162,51 @@ function ChatRoomPage() {
             <div ref={endRef} />
           </div>
         </div>
-      </div>
-
-      <div className="fixed bottom-6 left-1/2 z-50 w-[calc(100%-2rem)] max-w-5xl -translate-x-1/2">
-        <form
-          onSubmit={handleSend}
-          className="liquid-glass-floating flex items-center gap-3 rounded-full border border-black/[0.05] bg-white/70 px-4 py-3 backdrop-blur-[40px] backdrop-saturate-[1.8] dark:border-white/[0.08] dark:bg-[#1d1d1f]/70 sm:px-5"
-        >
-          <button
-            type="button"
-            className="glass-chip-muted inline-flex h-11 w-11 items-center justify-center rounded-full text-[var(--text-muted)] transition hover:text-[var(--text-primary)]"
-            aria-label="Send anonymized record"
-          >
-            <AttachmentIcon />
-          </button>
-          <input
-            type="text"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder="Send a protected message..."
-            className="min-w-0 flex-1 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]"
-          />
-          <button
-            type="submit"
-            disabled={!draft.trim()}
-            className="button-primary inline-flex h-11 w-11 items-center justify-center rounded-full disabled:cursor-not-allowed disabled:opacity-55"
-            aria-label="Send message"
-          >
-            <SendIcon />
-          </button>
-        </form>
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
+            <div className="mx-auto w-full">
+              <form
+                onSubmit={handleSend}
+                className="pointer-events-auto liquid-glass-floating chat-composer-surface flex items-center gap-3 rounded-full px-4 py-3 sm:px-5"
+              >
+                <button
+                  type="button"
+                  className="control-secondary inline-flex h-11 w-11 items-center justify-center rounded-full"
+                  aria-label="Send anonymized record"
+                >
+                  <AttachmentIcon />
+                </button>
+                <input
+                  type="text"
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  disabled={isComposerBlockedWaitingForOtherParticipant}
+                  placeholder={
+                    chatSessionStarted
+                      ? "Send a protected message..."
+                      : isPendingArrival
+                        ? "Confirm the wallet request to finish check-in..."
+                      : isComposerBlockedWaitingForOtherParticipant
+                        ? "You are already checked in. Wait for the other participant before chat unlocks."
+                        : "Your first message attempt counts as check-in."
+                  }
+                  className="min-w-0 flex-1 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] disabled:cursor-not-allowed disabled:opacity-60"
+                />
+                <button
+                  type="submit"
+                  disabled={
+                    !draft.trim() ||
+                    isComposerBlockedWaitingForOtherParticipant ||
+                    isPendingArrival
+                  }
+                  className="button-primary inline-flex h-11 w-11 items-center justify-center rounded-full disabled:cursor-not-allowed disabled:opacity-55"
+                  aria-label="Send message"
+                >
+                  <SendIcon />
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
       </div>
 
       {showWarningModal ? (

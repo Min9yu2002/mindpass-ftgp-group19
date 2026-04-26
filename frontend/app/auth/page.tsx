@@ -23,6 +23,7 @@ export default async function AuthPage({ searchParams }: AuthPageProps) {
             <SectionHeading
               eyebrow="Access"
               title="Zero-PII entry for protected mental health support"
+              titleClassName="font-hero-syne"
               description="MindPass uses a wallet-first identity flow. Claim your subsidy, connect your wallet, and enter support without names, emails, or traditional account forms."
             />
 
@@ -43,7 +44,7 @@ export default async function AuthPage({ searchParams }: AuthPageProps) {
                 <p className="text-sm uppercase tracking-[0.24em] text-[var(--text-faint)]">
                   Why MindPass
                 </p>
-                <h2 className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
+                <h2 className="font-hero-syne mt-3 text-2xl text-[var(--text-primary)]">
                   Convenience meets Zero-Knowledge
                 </h2>
               </div>

@@ -9,6 +9,7 @@ import { getDefaultConfig, RainbowKitProvider } from "@rainbow-me/rainbowkit";
 import { ThemeProvider } from "next-themes";
 import { WagmiProvider } from "wagmi";
 import { sepolia } from "wagmi/chains";
+import LiquidBackground from "../components/LiquidBackground";
 
 type ProvidersProps = {
   children: ReactNode;
@@ -18,7 +19,7 @@ const config = getDefaultConfig({
   appName: "MindPass",
   projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID ?? "",
   chains: [sepolia],
-  ssr: true,
+  ssr: false,
 });
 
 export default function Providers({ children }: ProvidersProps) {
@@ -26,11 +27,14 @@ export default function Providers({ children }: ProvidersProps) {
 
   return (
     <ThemeProvider attribute="class" defaultTheme="system">
-      <WagmiProvider config={config}>
-        <QueryClientProvider client={queryClient}>
-          <RainbowKitProvider>{children}</RainbowKitProvider>
-        </QueryClientProvider>
-      </WagmiProvider>
+      <LiquidBackground />
+      <div className="app-shell-root">
+        <WagmiProvider config={config}>
+          <QueryClientProvider client={queryClient}>
+            <RainbowKitProvider>{children}</RainbowKitProvider>
+          </QueryClientProvider>
+        </WagmiProvider>
+      </div>
     </ThemeProvider>
   );
 }

@@ -5,7 +5,7 @@ COMMENT ON COLUMN public.sessions.patient_joined_at IS
 COMMENT ON COLUMN public.sessions.therapist_joined_at IS
   'Timestamp of the therapist''s first valid in-session interaction. Opening the chat route alone must not populate this field.';
 COMMENT ON COLUMN public.sessions.no_show_deadline_at IS
-  'No-show deadline anchored to funded_at + 10 minutes while waiting for first valid participant interactions.';
+  'No-show deadline anchored to funded_at + 5 minutes while waiting for first valid participant interactions.';
 
 CREATE OR REPLACE FUNCTION public.enforce_session_arrival_deadline_semantics()
 RETURNS trigger
@@ -26,7 +26,7 @@ BEGIN
   END IF;
 
   IF NEW.funded_at IS NOT NULL THEN
-    NEW.no_show_deadline_at := NEW.funded_at + interval '10 minutes';
+    NEW.no_show_deadline_at := NEW.funded_at + interval '5 minutes';
   ELSIF NEW.status IN (
     'requested',
     'accepted_awaiting_payment',
@@ -47,10 +47,10 @@ FOR EACH ROW
 EXECUTE FUNCTION public.enforce_session_arrival_deadline_semantics();
 
 UPDATE public.sessions
-SET no_show_deadline_at = funded_at + interval '10 minutes'
+SET no_show_deadline_at = funded_at + interval '5 minutes'
 WHERE funded_at IS NOT NULL
   AND status IN ('funded', 'in_session')
-  AND no_show_deadline_at IS DISTINCT FROM funded_at + interval '10 minutes';
+  AND no_show_deadline_at IS DISTINCT FROM funded_at + interval '5 minutes';
 
 UPDATE public.sessions
 SET no_show_deadline_at = NULL

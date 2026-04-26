@@ -1,17 +1,17 @@
 "use server";
 
-import { createPublicClient, createWalletClient, http, parseEther } from "viem";
+import { createPublicClient, createWalletClient, http, parseEther, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { sepolia } from "viem/chains";
 
-function getNgoPrivateKey() {
+function getNgoPrivateKey(): Hex {
   const privateKey = process.env.NGO_PRIVATE_KEY;
 
   if (!privateKey) {
     throw new Error("NGO_PRIVATE_KEY is missing.");
   }
 
-  return privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
+  return (privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`) as Hex;
 }
 
 const account = privateKeyToAccount(getNgoPrivateKey());

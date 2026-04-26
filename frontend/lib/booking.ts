@@ -5,8 +5,11 @@ export const PATIENT_NO_SHOW_RATE = 0.5;
 export const MUTUAL_UNSTARTED_PLATFORM_FEE_RATE = 0.2;
 export const BOOKING_STEP_SCALE = Math.round(1 / BOOKING_STEP_ETH);
 export const SESSION_FEE_STEPS = Math.round(SESSION_FEE_ETH * BOOKING_STEP_SCALE);
-export const PAYMENT_WINDOW_MS = 60 * 1000;
-export const NO_SHOW_WINDOW_MINUTES = 2;
+export const PAYMENT_WINDOW_MINUTES = 3;
+export const PAYMENT_WINDOW_SECONDS = PAYMENT_WINDOW_MINUTES * 60;
+export const PAYMENT_WINDOW_MS = PAYMENT_WINDOW_MINUTES * 60 * 1000;
+export const PAYMENT_WINDOW_LABEL = `${PAYMENT_WINDOW_MINUTES} minutes`;
+export const NO_SHOW_WINDOW_MINUTES = 5;
 export const NO_SHOW_WINDOW_MS = NO_SHOW_WINDOW_MINUTES * 60 * 1000;
 export const NO_SHOW_WINDOW_LABEL = `${NO_SHOW_WINDOW_MINUTES} minutes`;
 export const PLATFORM_FEE_ETH = Number(
@@ -48,16 +51,25 @@ export type BookingFundingChoice = FundingResolution & {
   patientWalletChoiceEth: number;
 };
 
+export type SettlementStatus =
+  | "pending"
+  | "awaiting_patient_payment"
+  | "held_in_escrow"
+  | "released_to_therapist"
+  | "cancelled"
+  | "penalty_paid_to_therapist"
+  | "refunded_to_patient"
+  | "refunded_to_vault"
+  | "refunded_split_patient_vault"
+  | "mutual_unstarted_platform_fee";
+
 export type NoShowSettlementResult = {
   status: "patient_no_show" | "therapist_no_show" | "mutual_unstarted";
   penalty_fee_eth: number;
   refund_amount_eth: number;
   therapist_payout_eth: number;
   protocol_fee_eth: number;
-  settlement_status:
-    | "penalty_paid_to_therapist"
-    | "refunded_to_patient"
-    | "mutual_unstarted_platform_fee";
+  settlement_status: SettlementStatus;
 };
 
 export const OPEN_BOOKING_STATUSES = [
@@ -246,7 +258,7 @@ export function getSettlementPreview(status: string) {
     case "queued_waiting_for_provider":
       return "Provider is currently busy. You are in the wait queue and can leave at any time without charge.";
     case "accepted_awaiting_payment":
-      return "Provider accepted. Please confirm payment within 3 minutes.";
+      return `Provider accepted. Please confirm payment within ${PAYMENT_WINDOW_LABEL}.`;
     case "funded":
       return "Session funded. Waiting for both participants to enter.";
     case "in_session":
@@ -268,4 +280,28 @@ export function getSettlementPreview(status: string) {
     default:
       return "Session update available.";
   }
+}
+
+export function getPaymentWindowRemainingSeconds(
+  paymentDueAt?: string | null,
+  now = Date.now(),
+) {
+  if (!paymentDueAt) {
+    return null;
+  }
+
+  const deadline = new Date(paymentDueAt).getTime();
+  if (Number.isNaN(deadline)) {
+    return null;
+  }
+
+  return Math.max(0, Math.ceil((deadline - now) / 1000));
+}
+
+export function isPaymentWindowExpiredAt(
+  paymentDueAt?: string | null,
+  now = Date.now(),
+) {
+  const remainingSeconds = getPaymentWindowRemainingSeconds(paymentDueAt, now);
+  return remainingSeconds !== null && remainingSeconds <= 0;
 }

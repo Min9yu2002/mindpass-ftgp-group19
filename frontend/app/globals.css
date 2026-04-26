@@ -13,15 +13,74 @@ html {
 
 body {
   background: var(--body-gradient);
+  background-attachment: fixed;
   color: var(--text-primary);
   font-family: Arial, Helvetica, sans-serif;
   margin: 0;
   min-height: 100vh;
+  position: relative;
+  isolation: isolate;
+}
+
+.app-shell-root {
+  position: relative;
+  z-index: 1;
+}
+
+.liquid-background {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.liquid-background__canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  inset: -12%;
+  pointer-events: none;
+}
+
+body::before {
+  background:
+    var(--body-atmosphere),
+    var(--body-atmosphere-secondary);
+  z-index: -2;
+}
+
+body::after {
+  background: var(--body-vignette);
+  z-index: -1;
+}
+
+.font-brand-syne {
+  font-family: var(--font-syne), sans-serif;
+  font-weight: 700;
+}
+
+.font-hero-syne {
+  font-family: var(--font-syne), sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1;
 }
 
 .page-canvas {
   position: relative;
   isolation: isolate;
+}
+
+.page-canvas > * {
+  position: relative;
+  z-index: 1;
 }
 
 .page-canvas::before {
@@ -30,42 +89,50 @@ body {
   inset: 0;
   pointer-events: none;
   z-index: 0;
+  opacity: 0.96;
+}
+
+.page-canvas::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: var(--page-canvas-depth);
 }
 
 .page-canvas-violet::before {
-  background:
-    radial-gradient(circle at 12% 10%, rgba(129, 92, 255, 0.12), transparent 28%),
-    radial-gradient(circle at 84% 18%, rgba(98, 120, 255, 0.08), transparent 24%);
+  background: var(--page-canvas-violet-bloom);
 }
 
 .page-canvas-provider::before {
-  background:
-    radial-gradient(circle at 86% 12%, rgba(16, 185, 129, 0.1), transparent 28%),
-    radial-gradient(circle at 18% 78%, rgba(74, 144, 226, 0.06), transparent 22%);
+  background: var(--page-canvas-provider-bloom);
 }
 
 .page-canvas-soft::before {
-  background:
-    radial-gradient(circle at 12% 10%, rgba(16, 185, 129, 0.08), transparent 26%),
-    radial-gradient(circle at 82% 18%, rgba(6, 182, 212, 0.05), transparent 22%);
+  background: var(--page-canvas-soft-bloom);
 }
 
-.dark .page-canvas-violet::before {
-  background:
-    radial-gradient(circle at 12% 10%, rgba(129, 92, 255, 0.16), transparent 28%),
-    radial-gradient(circle at 84% 18%, rgba(98, 120, 255, 0.1), transparent 24%);
+html[data-liquid-background="interactive"] body::before {
+  opacity: 0.38;
 }
 
-.dark .page-canvas-provider::before {
-  background:
-    radial-gradient(circle at 86% 12%, rgba(16, 185, 129, 0.12), transparent 30%),
-    radial-gradient(circle at 18% 78%, rgba(74, 144, 226, 0.07), transparent 24%);
+html[data-liquid-background="interactive"] body::after {
+  opacity: 0.48;
 }
 
-.dark .page-canvas-soft::before {
-  background:
-    radial-gradient(circle at 12% 10%, rgba(116, 82, 255, 0.14), transparent 28%),
-    radial-gradient(circle at 80% 20%, rgba(74, 144, 226, 0.1), transparent 25%);
+html[data-liquid-background="interactive"] .page-canvas::before {
+  opacity: 0.58;
+}
+
+html[data-liquid-background="interactive"] .page-canvas::after {
+  opacity: 0.62;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .liquid-background__canvas {
+    transition: opacity 180ms ease;
+  }
 }
 
 ::-webkit-scrollbar {

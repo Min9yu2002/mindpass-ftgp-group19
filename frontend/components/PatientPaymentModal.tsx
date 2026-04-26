@@ -1,6 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import ModalPortal from "./ModalPortal";
+import {
+  getPaymentWindowRemainingSeconds,
+  PAYMENT_WINDOW_LABEL,
+} from "../lib/booking";
 
 type PatientPaymentModalProps = {
   providerName: string;
@@ -19,16 +24,7 @@ function formatEth(value: number) {
 }
 
 function getSecondsLeft(paymentDueAt?: string | null) {
-  if (!paymentDueAt) {
-    return null;
-  }
-
-  const target = new Date(paymentDueAt).getTime();
-  if (Number.isNaN(target)) {
-    return null;
-  }
-
-  return Math.max(0, Math.ceil((target - Date.now()) / 1000));
+  return getPaymentWindowRemainingSeconds(paymentDueAt);
 }
 
 function formatCountdown(seconds: number) {
@@ -89,101 +85,110 @@ export default function PatientPaymentModal({
   }, [isSubmitting, onCancel]);
 
   const confirmLabel = useMemo(
-    () => (walletRequired <= 0 ? "Start Chat" : "Pay & Start Chat"),
-    [walletRequired],
+    () => {
+      if (walletRequired <= 0) {
+        return subsidyApplied > 0 ? "Confirm Funding" : "Start Chat";
+      }
+
+      return "Pay & Start Chat";
+    },
+    [subsidyApplied, walletRequired],
   );
 
   return (
-    <div
-      className="fixed inset-0 z-[95] flex items-center justify-center bg-black/40 px-6 py-8 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      onClick={isSubmitting ? undefined : onCancel}
-    >
+    <ModalPortal>
       <div
-        className="liquid-glass-strong relative w-full max-w-xl rounded-[32px] border border-black/[0.05] bg-white/70 p-6 shadow-2xl dark:border-white/[0.08] dark:bg-[#1d1d1f]/70 sm:p-7"
-        onClick={(event) => event.stopPropagation()}
+        className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 px-6 py-8 backdrop-blur-sm"
+        role="dialog"
+        aria-modal="true"
+        onClick={isSubmitting ? undefined : onCancel}
       >
-        <div className="mb-6 flex items-start justify-between gap-4">
-          <div>
-            <p className="text-sm uppercase tracking-[0.24em] text-[var(--text-faint)]">
-              Payment Confirmation
-            </p>
-            <h2 className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
-              Provider accepted your request
-            </h2>
-            <p className="mt-2 text-sm text-[var(--text-muted)]">
-              Confirm funding for your session with {providerName}.
+        <div
+          className="liquid-glass-floating glass-navbar-surface relative w-full max-w-xl rounded-[32px] p-6 sm:p-7"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="mb-6 flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm uppercase tracking-[0.24em] text-[var(--text-faint)]">
+                Payment Confirmation
+              </p>
+              <h2 className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
+                Provider accepted your request
+              </h2>
+              <p className="mt-2 text-sm text-[var(--text-muted)]">
+                Confirm funding for your session with {providerName}.
+              </p>
+            </div>
+            {secondsLeft !== null ? (
+              <div className="glass-chip px-4 py-2 text-sm font-semibold text-[var(--accent-primary-strong)]">
+                {formatCountdown(secondsLeft)}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="liquid-glass-soft flex min-h-[124px] flex-col rounded-[22px] px-4 py-4">
+              <p className="text-xs uppercase tracking-[0.16em] text-[var(--text-faint)]">
+                Total Fee
+              </p>
+              <p className="mt-auto text-lg font-semibold text-[var(--text-primary)]">
+                {formatEth(totalFee)}
+              </p>
+            </div>
+            <div className="flex min-h-[124px] flex-col rounded-[22px] border border-emerald-400/20 bg-emerald-500/8 px-4 py-4">
+              <p className="text-xs uppercase tracking-[0.16em] text-emerald-700 dark:text-emerald-300">
+                Subsidy Applied
+              </p>
+              <p className="mt-auto text-lg font-semibold text-emerald-700 dark:text-emerald-200">
+                {formatEth(subsidyApplied)}
+              </p>
+            </div>
+            <div className="flex min-h-[124px] flex-col rounded-[22px] border border-violet-400/20 bg-violet-500/8 px-4 py-4">
+              <p className="text-xs uppercase tracking-[0.16em] text-violet-700 dark:text-violet-300">
+                Self-funded now
+              </p>
+              <p className="mt-auto text-lg font-semibold text-violet-700 dark:text-violet-200">
+                {formatEth(walletRequired)}
+              </p>
+            </div>
+          </div>
+
+          <div className="liquid-glass-soft mt-5 rounded-[22px] border border-amber-400/20 bg-amber-400/10 px-4 py-4">
+            <p className="text-sm leading-6 text-amber-700 dark:text-amber-200">
+              Please confirm payment within {PAYMENT_WINDOW_LABEL}. If you do not
+              confirm in time, the booking will expire and you will need to book
+              again.
             </p>
           </div>
-          {secondsLeft !== null ? (
-            <div className="glass-chip px-4 py-2 text-sm font-semibold text-[var(--accent-primary-strong)]">
-              {formatCountdown(secondsLeft)}
+
+          {errorMessage ? (
+            <div className="liquid-glass-soft mt-5 rounded-[20px] border border-red-400/20 bg-red-500/8 px-4 py-4">
+              <p className="text-sm text-red-600 dark:text-red-300">
+                {errorMessage}
+              </p>
             </div>
           ) : null}
-        </div>
 
-        <div className="grid gap-3 sm:grid-cols-3">
-          <div className="liquid-glass-soft rounded-[22px] px-4 py-4">
-            <p className="text-xs uppercase tracking-[0.16em] text-[var(--text-faint)]">
-              Total Fee
-            </p>
-            <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">
-              {formatEth(totalFee)}
-            </p>
+          <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-end">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={isSubmitting}
+              className="button-secondary rounded-full px-5 py-3 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void onConfirm()}
+              disabled={isSubmitting}
+              className="button-primary inline-flex items-center justify-center rounded-full px-5 py-3 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isSubmitting ? "Awaiting confirmation..." : confirmLabel}
+            </button>
           </div>
-          <div className="rounded-[22px] border border-emerald-400/20 bg-emerald-500/8 px-4 py-4">
-            <p className="text-xs uppercase tracking-[0.16em] text-emerald-700 dark:text-emerald-300">
-              Subsidy Applied
-            </p>
-            <p className="mt-2 text-lg font-semibold text-emerald-700 dark:text-emerald-200">
-              {formatEth(subsidyApplied)}
-            </p>
-          </div>
-          <div className="rounded-[22px] border border-violet-400/20 bg-violet-500/8 px-4 py-4">
-            <p className="text-xs uppercase tracking-[0.16em] text-violet-700 dark:text-violet-300">
-              Self-funded now
-            </p>
-            <p className="mt-2 text-lg font-semibold text-violet-700 dark:text-violet-200">
-              {formatEth(walletRequired)}
-            </p>
-          </div>
-        </div>
-
-        <div className="mt-5 rounded-[22px] border border-amber-400/20 bg-amber-400/10 px-4 py-4">
-          <p className="text-sm leading-6 text-amber-700 dark:text-amber-200">
-            Please confirm payment within 3 minutes. If you do not confirm in
-            time, the booking will expire and you will need to book again.
-          </p>
-        </div>
-
-        {errorMessage ? (
-          <div className="mt-5 rounded-[20px] border border-red-400/20 bg-red-500/8 px-4 py-4">
-            <p className="text-sm text-red-600 dark:text-red-300">
-              {errorMessage}
-            </p>
-          </div>
-        ) : null}
-
-        <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-end">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={isSubmitting}
-            className="button-secondary rounded-full px-5 py-3 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => void onConfirm()}
-            disabled={isSubmitting}
-            className="button-primary inline-flex items-center justify-center rounded-full px-5 py-3 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {isSubmitting ? "Submitting..." : confirmLabel}
-          </button>
         </div>
       </div>
-    </div>
+    </ModalPortal>
   );
 }

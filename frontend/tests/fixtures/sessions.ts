@@ -116,7 +116,7 @@ export const subsidyFundingSession = createSessionFixture({
   patient_wallet_choice_eth: 0,
   settlement_status: "held_in_escrow",
   funded_at: "2026-03-18T10:05:00.000Z",
-  no_show_deadline_at: "2026-03-18T10:07:00.000Z",
+  no_show_deadline_at: "2026-03-18T10:10:00.000Z",
 });
 
 export const mixedFundingSession = createSessionFixture({
@@ -130,7 +130,7 @@ export const mixedFundingSession = createSessionFixture({
   patient_wallet_choice_eth: 0.0025,
   settlement_status: "held_in_escrow",
   funded_at: "2026-03-18T10:05:00.000Z",
-  no_show_deadline_at: "2026-03-18T10:07:00.000Z",
+  no_show_deadline_at: "2026-03-18T10:10:00.000Z",
 });
 
 export const inSessionFixture = createSessionFixture({
@@ -144,7 +144,7 @@ export const inSessionFixture = createSessionFixture({
   patient_wallet_choice_eth: 0.0025,
   settlement_status: "held_in_escrow",
   funded_at: "2026-03-18T10:05:00.000Z",
-  no_show_deadline_at: "2026-03-18T10:07:00.000Z",
+  no_show_deadline_at: "2026-03-18T10:10:00.000Z",
   patient_joined_at: "2026-03-18T10:07:00.000Z",
   therapist_joined_at: "2026-03-18T10:08:00.000Z",
   session_started_at: "2026-03-18T10:08:00.000Z",
@@ -192,7 +192,7 @@ export const patientNoShowSession = createSessionFixture({
   refund_amount_eth: 0.0025,
   therapist_payout_eth: 0.0025,
   therapist_joined_at: "2026-03-18T10:10:00.000Z",
-  no_show_deadline_at: "2026-03-18T10:07:00.000Z",
+  no_show_deadline_at: "2026-03-18T10:10:00.000Z",
 });
 
 export const therapistNoShowSession = createSessionFixture({
@@ -207,7 +207,7 @@ export const therapistNoShowSession = createSessionFixture({
   settlement_status: "refunded_to_patient",
   refund_amount_eth: 0.005,
   patient_joined_at: "2026-03-18T10:10:00.000Z",
-  no_show_deadline_at: "2026-03-18T10:07:00.000Z",
+  no_show_deadline_at: "2026-03-18T10:10:00.000Z",
 });
 
 export const mutualUnstartedSession = createSessionFixture({
@@ -222,7 +222,7 @@ export const mutualUnstartedSession = createSessionFixture({
   settlement_status: "mutual_unstarted_platform_fee",
   refund_amount_eth: 0.004,
   protocol_fee_eth: 0.001,
-  no_show_deadline_at: "2026-03-18T10:07:00.000Z",
+  no_show_deadline_at: "2026-03-18T10:10:00.000Z",
 });
 
 export const rejectedSession = createSessionFixture({

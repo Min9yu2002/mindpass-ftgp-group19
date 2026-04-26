@@ -50,9 +50,6 @@ export default function VoiceCallControls({
         aria-label="Start voice call"
       >
         <PhoneCall size={18} />
-        <span className="absolute -top-10 scale-0 rounded-full bg-black/80 px-2 py-1 text-[11px] text-white transition-all group-hover:scale-100">
-          Start Voice Call
-        </span>
       </button>
     );
   }
@@ -76,7 +73,7 @@ export default function VoiceCallControls({
         <span className="text-[10px] uppercase tracking-[0.18em] text-emerald-600 dark:text-emerald-300">
           {status === "ringing"
             ? ringingLabel ?? "Incoming Call..."
-            : "Live Voice Encrypted"}
+            : "Voice Channel Active"}
         </span>
         <span className="font-mono text-sm text-[var(--text-primary)]">
           {formatCallTimer(effectiveCallSeconds)}

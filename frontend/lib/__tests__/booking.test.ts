@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   BOOKING_STEP_ETH,
+  NO_SHOW_WINDOW_LABEL,
+  NO_SHOW_WINDOW_MINUTES,
+  PAYMENT_WINDOW_MINUTES,
+  PAYMENT_WINDOW_LABEL,
   SESSION_FEE_ETH,
   clampSelfPayChoice,
   getBookingFundingSource,
@@ -139,14 +143,21 @@ test("getSettlementPreview returns stable copy for major workflow states", () =>
   );
   assert.equal(
     getSettlementPreview("patient_no_show"),
-    "You did not arrive within 2 minutes. 50% of the session fee was refunded and 50% was paid to the therapist.",
+    "You did not arrive within 5 minutes. 50% of the session fee was refunded and 50% was paid to the therapist.",
   );
   assert.equal(
     getSettlementPreview("mutual_unstarted"),
-    "Neither participant arrived within 2 minutes. 80% of the session fee was refunded and a 20% platform fee was retained.",
+    "Neither participant arrived within 5 minutes. 80% of the session fee was refunded and a 20% platform fee was retained.",
   );
   assert.equal(
     getSettlementPreview("patient_cancelled_waiting"),
     "You left the provider wait queue. No fee, penalty, or deposit was charged.",
   );
+});
+
+test("timing constants stay normalized to the canonical business rules", () => {
+  assert.equal(PAYMENT_WINDOW_MINUTES, 3);
+  assert.equal(PAYMENT_WINDOW_LABEL, "3 minutes");
+  assert.equal(NO_SHOW_WINDOW_MINUTES, 5);
+  assert.equal(NO_SHOW_WINDOW_LABEL, "5 minutes");
 });

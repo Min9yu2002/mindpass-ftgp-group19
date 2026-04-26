@@ -6,8 +6,12 @@ import {
   buildBookingRequestedPatch,
   buildCancelledUnstartedPatch,
   buildPatientCheckedInPatch,
+  buildPatientNoShowPatch,
   buildPaymentTimeoutPatch,
   buildSessionStartedPatch,
+  buildTherapistNoShowPatch,
+  buildWithdrawalPatch,
+  compactSessionSyncPatch,
   decodeSessionModeBytes32,
   deriveFundingSourceFromRequiredSplit,
   getDbStatusForEscrowEvent,
@@ -86,8 +90,121 @@ test("payment timeout and cancelled-unstarted patches carry explicit refund spli
 
   assert.equal(timeoutPatch.total_refund_eth, "0.005");
   assert.equal(timeoutPatch.status, "payment_timeout");
+  assert.equal(timeoutPatch.settlement_status, "refunded_split_patient_vault");
   assert.equal(cancelledPatch.total_refund_eth, "0.005");
   assert.equal(cancelledPatch.status, "cancelled_unstarted");
+  assert.equal(cancelledPatch.settlement_status, "refunded_split_patient_vault");
+});
+
+test("patient no-show patch keeps full wallet-funded refunds on the patient side", () => {
+  const txHash = "0xwallet-patient-no-show";
+  const patch = buildPatientNoShowPatch({
+    therapistPayoutWei: 1_000_000_000_000_000n,
+    patientRefundWei: 4_000_000_000_000_000n,
+    vaultRefundWei: 0n,
+    penaltyFeeWei: 1_000_000_000_000_000n,
+    contractAddress: "0x0000000000000000000000000000000000000001",
+    txHash,
+  });
+
+  assert.equal(patch.therapist_payout_eth, "0.001");
+  assert.equal(patch.penalty_fee_eth, "0.001");
+  assert.equal(patch.patient_refund_eth, "0.004");
+  assert.equal(patch.vault_refund_eth, "0");
+  assert.equal(patch.subsidy_refunded_eth, "0");
+  assert.equal(patch.total_refund_eth, "0.004");
+  assert.equal(patch.refund_amount_eth, "0.004");
+  assert.equal(patch.protocol_fee_eth, "0");
+  assert.equal(patch.settlement_status, "penalty_paid_to_therapist");
+  assert.equal(patch.resolve_no_show_tx_hash, txHash);
+  assert.equal(patch.last_synced_tx_hash, txHash);
+  assert.equal(patch.last_onchain_event, "PatientNoShowResolved");
+});
+
+test("patient no-show patch keeps full subsidy-funded refunds on the vault side", () => {
+  const patch = buildPatientNoShowPatch({
+    therapistPayoutWei: 1_000_000_000_000_000n,
+    patientRefundWei: 0n,
+    vaultRefundWei: 4_000_000_000_000_000n,
+    penaltyFeeWei: 1_000_000_000_000_000n,
+    contractAddress: "0x0000000000000000000000000000000000000001",
+    txHash: "0xsubsidy-patient-no-show",
+  });
+
+  assert.equal(patch.therapist_payout_eth, "0.001");
+  assert.equal(patch.penalty_fee_eth, "0.001");
+  assert.equal(patch.patient_refund_eth, "0");
+  assert.equal(patch.vault_refund_eth, "0.004");
+  assert.equal(patch.subsidy_refunded_eth, "0.004");
+  assert.equal(patch.total_refund_eth, "0.004");
+  assert.equal(patch.refund_amount_eth, "0.004");
+  assert.equal(patch.protocol_fee_eth, "0");
+  assert.equal(patch.settlement_status, "penalty_paid_to_therapist");
+});
+
+test("patient no-show patch uses mixed-funding event values directly", () => {
+  const patch = buildPatientNoShowPatch({
+    therapistPayoutWei: 1_000_000_000_000_000n,
+    patientRefundWei: 2_400_000_000_000_000n,
+    vaultRefundWei: 1_600_000_000_000_000n,
+    penaltyFeeWei: 1_000_000_000_000_000n,
+    contractAddress: "0x0000000000000000000000000000000000000001",
+    txHash: "0xmixed-patient-no-show",
+  });
+
+  assert.equal(patch.therapist_payout_eth, "0.001");
+  assert.equal(patch.penalty_fee_eth, "0.001");
+  assert.equal(patch.patient_refund_eth, "0.0024");
+  assert.equal(patch.vault_refund_eth, "0.0016");
+  assert.equal(patch.subsidy_refunded_eth, "0.0016");
+  assert.equal(patch.total_refund_eth, "0.004");
+  assert.equal(patch.refund_amount_eth, "0.004");
+  assert.equal(patch.protocol_fee_eth, "0");
+  assert.equal(patch.settlement_status, "penalty_paid_to_therapist");
+});
+
+test("therapist no-show patch keeps patient-funded refunds as patient withdrawals", () => {
+  const txHash = "0xpatient";
+  const patch = buildTherapistNoShowPatch({
+    patientRefundWei: 5_000_000_000_000_000n,
+    vaultRefundWei: 0n,
+    contractAddress: "0x0000000000000000000000000000000000000001",
+    txHash,
+  });
+
+  assert.equal(patch.patient_refund_eth, "0.005");
+  assert.equal(patch.vault_refund_eth, "0");
+  assert.equal(patch.settlement_status, "refunded_to_patient");
+  assert.equal(patch.resolve_no_show_tx_hash, txHash);
+  assert.equal(patch.last_synced_tx_hash, txHash);
+  assert.equal(patch.last_onchain_event, "TherapistNoShowResolved");
+});
+
+test("therapist no-show patch keeps full subsidy refunds on the vault side", () => {
+  const patch = buildTherapistNoShowPatch({
+    patientRefundWei: 0n,
+    vaultRefundWei: 5_000_000_000_000_000n,
+    contractAddress: "0x0000000000000000000000000000000000000001",
+    txHash: "0xvault",
+  });
+
+  assert.equal(patch.patient_refund_eth, "0");
+  assert.equal(patch.vault_refund_eth, "0.005");
+  assert.equal(patch.subsidy_refunded_eth, "0.005");
+  assert.equal(patch.settlement_status, "refunded_to_vault");
+});
+
+test("therapist no-show patch marks mixed funding as split between patient and vault", () => {
+  const patch = buildTherapistNoShowPatch({
+    patientRefundWei: 3_000_000_000_000_000n,
+    vaultRefundWei: 2_000_000_000_000_000n,
+    contractAddress: "0x0000000000000000000000000000000000000001",
+    txHash: "0xmixed",
+  });
+
+  assert.equal(patch.patient_refund_eth, "0.003");
+  assert.equal(patch.vault_refund_eth, "0.002");
+  assert.equal(patch.settlement_status, "refunded_split_patient_vault");
 });
 
 test("normalizers keep addresses lowercase and wei formatting precise", () => {
@@ -102,6 +219,100 @@ test("event helpers expose consistent tx-hash and status mappings", () => {
   assert.equal(getTxHashFieldForEvent("BookingRequested"), "create_booking_tx_hash");
   assert.equal(getTxHashFieldForEvent("SessionFunded"), null);
   assert.equal(getDbStatusForEscrowEvent("SessionCompleted"), "completed");
+});
+
+test("withdrawal patch syncs patient audit metadata", () => {
+  const txHash = "0xwithdraw-patient";
+  const patch = buildWithdrawalPatch({
+    beneficiary: "patient",
+    txHash,
+  });
+
+  assert.equal(patch.patient_withdrawal_tx_hash, txHash);
+  assert.equal(patch.last_synced_tx_hash, txHash);
+  assert.equal(patch.last_onchain_event, "Withdrawal");
+  assert.ok(patch.last_synced_at);
+  assert.equal("resolve_no_show_tx_hash" in patch, false);
+});
+
+test("withdrawal patch syncs therapist audit metadata", () => {
+  const txHash = "0xwithdraw-therapist";
+  const patch = buildWithdrawalPatch({
+    beneficiary: "therapist",
+    txHash,
+  });
+
+  assert.equal(patch.therapist_withdrawal_tx_hash, txHash);
+  assert.equal(patch.last_synced_tx_hash, txHash);
+  assert.equal(patch.last_onchain_event, "Withdrawal");
+  assert.ok(patch.last_synced_at);
+  assert.equal("resolve_no_show_tx_hash" in patch, false);
+});
+
+test("withdrawal patch syncs vault audit metadata", () => {
+  const txHash = "0xwithdraw-vault";
+  const patch = buildWithdrawalPatch({
+    beneficiary: "vault",
+    txHash,
+  });
+
+  assert.equal(patch.vault_withdrawal_tx_hash, txHash);
+  assert.equal(patch.last_synced_tx_hash, txHash);
+  assert.equal(patch.last_onchain_event, "Withdrawal");
+  assert.ok(patch.last_synced_at);
+  assert.equal("resolve_no_show_tx_hash" in patch, false);
+});
+
+test("withdrawal patch syncs protocol audit metadata", () => {
+  const txHash = "0xwithdraw-protocol";
+  const patch = buildWithdrawalPatch({
+    beneficiary: "protocol",
+    txHash,
+  });
+
+  assert.equal(patch.protocol_withdrawal_tx_hash, txHash);
+  assert.equal(patch.last_synced_tx_hash, txHash);
+  assert.equal(patch.last_onchain_event, "Withdrawal");
+  assert.ok(patch.last_synced_at);
+  assert.equal("resolve_no_show_tx_hash" in patch, false);
+});
+
+test("withdrawal patch composition preserves existing no-show resolution tx hash", () => {
+  const resolveTxHash = "0xresolve";
+  const withdrawalTxHash = "0xwithdraw";
+  const resolutionPatch = buildPatientNoShowPatch({
+    therapistPayoutWei: 1_000_000_000_000_000n,
+    patientRefundWei: 4_000_000_000_000_000n,
+    vaultRefundWei: 0n,
+    penaltyFeeWei: 1_000_000_000_000_000n,
+    contractAddress: "0x0000000000000000000000000000000000000001",
+    txHash: resolveTxHash,
+  });
+  const withdrawalPatch = buildWithdrawalPatch({
+    beneficiary: "patient",
+    txHash: withdrawalTxHash,
+  });
+  const composedPatch = {
+    ...resolutionPatch,
+    ...withdrawalPatch,
+  };
+
+  assert.equal(withdrawalPatch.resolve_no_show_tx_hash, undefined);
+  assert.equal(composedPatch.resolve_no_show_tx_hash, resolveTxHash);
+  assert.equal(composedPatch.patient_withdrawal_tx_hash, withdrawalTxHash);
+  assert.equal(composedPatch.last_synced_tx_hash, withdrawalTxHash);
+});
+
+test("compactSessionSyncPatch drops undefined no-show tx hash fields before update", () => {
+  const rawPatch = buildTherapistNoShowPatch({
+    patientRefundWei: 5_000_000_000_000_000n,
+    vaultRefundWei: 0n,
+    contractAddress: "0x0000000000000000000000000000000000000001",
+  });
+  const compactedPatch = compactSessionSyncPatch(rawPatch);
+
+  assert.equal(rawPatch.resolve_no_show_tx_hash, undefined);
+  assert.equal("resolve_no_show_tx_hash" in compactedPatch, false);
 });
 
 test("check-in and session-start patches normalize timestamps and tracking fields", () => {

@@ -35,10 +35,12 @@ function DarkIcon() {
 
 function SystemIcon() {
   return (
-    <svg viewBox="0 0 36 36" fill="none" aria-hidden="true">
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
       <path
         fill="currentColor"
-        d="M5 21a1 1 0 0 1 1-1h24a1 1 0 1 1 0 2H6a1 1 0 0 1-1-1ZM12 25a1 1 0 0 1 1-1h10a1 1 0 1 1 0 2H13a1 1 0 0 1-1-1ZM15 29a1 1 0 0 1 1-1h4a1 1 0 1 1 0 2h-4a1 1 0 0 1-1-1ZM18 13a6 6 0 0 1 5.915 7h-2.041A4.005 4.005 0 0 0 18 15a4 4 0 0 0-3.874 5h-2.041A6 6 0 0 1 18 13ZM17 7.038a1 1 0 1 1 2 0v3a1 1 0 0 1-2 0v-3ZM24.244 8.742a1 1 0 1 1 1.618 1.176L24.1 12.345a1 1 0 1 1-1.618-1.176l1.763-2.427ZM29.104 14.379a1 1 0 0 1 .618 1.902l-2.854.927a1 1 0 1 1-.618-1.902l2.854-.927ZM6.278 16.28a1 1 0 1 1 .618-1.901l2.853.927a1 1 0 1 1-.618 1.902l-2.853-.927ZM10.137 9.918a1 1 0 0 1 1.618-1.176l1.764 2.427a1 1 0 0 1-1.618 1.176l-1.764-2.427Z"
+        fillRule="evenodd"
+        d="M1.5 3.5A2.5 2.5 0 0 1 4 1h12a2.5 2.5 0 0 1 2.5 2.5V11A2.5 2.5 0 0 1 16 13.5h-4.25V15H14a1 1 0 1 1 0 2H6a1 1 0 1 1 0-2h2.25v-1.5H4A2.5 2.5 0 0 1 1.5 11V3.5ZM4 3a.5.5 0 0 0-.5.5V11a.5.5 0 0 0 .5.5h12a.5.5 0 0 0 .5-.5V3.5A.5.5 0 0 0 16 3H4Z"
+        clipRule="evenodd"
       />
     </svg>
   );
@@ -77,44 +79,51 @@ export default function ThemeToggle() {
   }
 
   return (
-    <div
-      className={`theme-switcher liquid-glass-floating fixed right-6 bottom-6 left-auto z-50 theme-switcher--${activeTheme}`}
-      role="group"
-      aria-label="Theme switcher"
-    >
-      <span className="sr-only">Choose theme</span>
+    <div className="theme-switcher-anchor fixed right-6 bottom-6 left-auto z-50">
       <div
-        className={`theme-switcher__indicator ${motionClass}`}
-        style={{ transform: `translateX(${activeIndex * 100}%)` }}
-        aria-hidden="true"
-      />
+        className={`theme-switcher liquid-glass-floating theme-switcher--${activeTheme}`}
+        role="group"
+        aria-label="Theme switcher"
+      >
+        <span className="sr-only">Choose theme</span>
+        <div
+          className={`theme-switcher__indicator ${motionClass}`}
+          style={{ transform: `translateX(${activeIndex * 100}%)` }}
+          aria-hidden="true"
+        />
 
-      {themes.map((themeName) => {
-        const isActive = activeTheme === themeName;
+        {themes.map((themeName) => {
+          const isActive = activeTheme === themeName;
 
-        return (
-          <button
-            key={themeName}
-            type="button"
-            onClick={() => setTheme(themeName)}
-            className={`theme-switcher__option ${
-              isActive ? "theme-switcher__option--active" : ""
-            }`}
-            aria-pressed={isActive}
-            aria-label={`Set theme to ${themeMeta[themeName].label}`}
-          >
-            <span className="theme-switcher__icon" aria-hidden="true">
-              {(() => {
-                const Icon = themeMeta[themeName].icon;
-                return <Icon />;
-              })()}
-            </span>
-            <span className="theme-switcher__label">
-              {themeMeta[themeName].label}
-            </span>
-          </button>
-        );
-      })}
+          return (
+            <button
+              key={themeName}
+              type="button"
+              onClick={() => setTheme(themeName)}
+              className={`theme-switcher__option ${
+                isActive ? "theme-switcher__option--active" : ""
+              }`}
+              aria-pressed={isActive}
+              aria-label={`Set theme to ${themeMeta[themeName].label}`}
+            >
+              <span
+                className={`theme-switcher__icon ${
+                  themeName === "system" ? "theme-switcher__icon--system" : ""
+                }`}
+                aria-hidden="true"
+              >
+                {(() => {
+                  const Icon = themeMeta[themeName].icon;
+                  return <Icon />;
+                })()}
+              </span>
+              <span className="theme-switcher__label">
+                {themeMeta[themeName].label}
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

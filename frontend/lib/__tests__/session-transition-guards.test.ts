@@ -46,7 +46,7 @@ test("payment timeout catch-up only triggers once the payment window has passed"
 });
 
 test("funded no-show catch-up resolves patient_no_show and therapist_no_show from attendance", () => {
-  const afterDeadline = Date.parse("2026-03-18T10:08:00.000Z");
+  const afterDeadline = Date.parse("2026-03-18T10:11:00.000Z");
 
   assert.equal(
     shouldCatchFundedNoShow(
@@ -179,7 +179,7 @@ test("arrival interactions only count before funded deadline unless the session 
         status: mixedFundingSession.status,
         noShowDeadlineAt: mixedFundingSession.no_show_deadline_at,
       },
-      Date.parse("2026-03-18T10:08:00.000Z"),
+      Date.parse("2026-03-18T10:11:00.000Z"),
     ),
     false,
   );

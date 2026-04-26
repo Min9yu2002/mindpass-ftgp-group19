@@ -1,7 +1,7 @@
 BEGIN;
 
 COMMENT ON COLUMN public.sessions.no_show_deadline_at IS
-  'Local testing override: no-show deadline anchored to funded_at + 2 minutes while waiting for first valid participant interactions.';
+  'Canonical no-show deadline anchored to funded_at + 5 minutes while waiting for first valid participant interactions.';
 
 CREATE OR REPLACE FUNCTION public.enforce_session_arrival_deadline_semantics()
 RETURNS trigger
@@ -22,7 +22,7 @@ BEGIN
   END IF;
 
   IF NEW.funded_at IS NOT NULL THEN
-    NEW.no_show_deadline_at := NEW.funded_at + interval '2 minutes';
+    NEW.no_show_deadline_at := NEW.funded_at + interval '5 minutes';
   ELSIF NEW.status IN (
     'requested',
     'accepted_awaiting_payment',
@@ -37,9 +37,9 @@ END;
 $$;
 
 UPDATE public.sessions
-SET no_show_deadline_at = funded_at + interval '2 minutes'
+SET no_show_deadline_at = funded_at + interval '5 minutes'
 WHERE funded_at IS NOT NULL
   AND status IN ('funded', 'in_session')
-  AND no_show_deadline_at IS DISTINCT FROM funded_at + interval '2 minutes';
+  AND no_show_deadline_at IS DISTINCT FROM funded_at + interval '5 minutes';
 
 COMMIT;

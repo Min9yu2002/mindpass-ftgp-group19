@@ -1,4 +1,4 @@
-import { OPEN_BOOKING_STATUSES } from "./booking.ts";
+import { OPEN_BOOKING_STATUSES } from "./booking";
 
 export const SESSION_WORKFLOW_STATUSES = [
   "requested",

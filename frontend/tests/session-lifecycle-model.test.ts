@@ -103,11 +103,11 @@ test("provider ready modal also dedupes by funded session id", () => {
 test("terminal feedback model renders patient_no_show and therapist_no_show differently", () => {
   assert.deepEqual(buildPatientBookingFeedback(patientNoShowSession.status), {
     message:
-      "You did not arrive within 2 minutes. 50% of the session fee was refunded and 50% was paid to the therapist.",
+      "You did not arrive within 5 minutes. 50% of the session fee was refunded and 50% was paid to the therapist.",
     tone: "warning",
   });
   assert.deepEqual(buildPatientBookingFeedback(therapistNoShowSession.status), {
-    message: "The therapist did not arrive within 2 minutes. You have received a full refund.",
+    message: "The therapist did not arrive within 5 minutes. You have received a full refund.",
     tone: "success",
   });
 });

@@ -5,6 +5,7 @@ import Link from "next/link";
 import GlassCard from "../../components/GlassCard";
 import SectionHeading from "../../components/SectionHeading";
 import StatusBadge from "../../components/StatusBadge";
+import { PAYMENT_WINDOW_LABEL } from "../../lib/booking";
 import { mockTherapists } from "../../lib/mock-therapists";
 
 export default function SessionLobbyPage() {
@@ -15,7 +16,7 @@ export default function SessionLobbyPage() {
 
     setTimeout(() => {
       setRequestingId(null);
-      alert(`Request sent to ${therapistName}. 0.05 ETH has been locked in escrow.`);
+      alert(`Request sent to ${therapistName}. 0.005 ETH has been locked in escrow.`);
     }, 2000);
   };
 
@@ -117,7 +118,7 @@ export default function SessionLobbyPage() {
                           {requestingId === therapist.id
                             ? "Locking Escrow & Requesting..."
                             : therapist.isOnline
-                              ? "Request Instant Session (Lock 0.05 ETH)"
+                              ? "Request Instant Session (Lock 0.005 ETH)"
                               : "Currently Offline"}
                         </button>
                       </div>
@@ -140,11 +141,12 @@ export default function SessionLobbyPage() {
 
               <div className="space-y-3 text-sm leading-7 text-[var(--text-muted)]">
                 <p className="liquid-glass-soft rounded-[22px] border border-white/5 px-4 py-4">
-                  When you request a session, <span className="font-semibold text-white">0.05 ETH</span>{" "}
+                  When you request a session, <span className="font-semibold text-white">0.005 ETH</span>{" "}
                   is locked in a decentralized escrow.
                 </p>
                 <p className="liquid-glass-soft rounded-[22px] border border-white/5 px-4 py-4">
-                  If the therapist declines or <span className="font-semibold text-white">5 minutes</span>{" "}
+                  If the therapist declines or{" "}
+                  <span className="font-semibold text-white">{PAYMENT_WINDOW_LABEL}</span>{" "}
                   pass, your funds are instantly refunded.
                 </p>
                 <div className="liquid-glass-soft rounded-[22px] border border-white/5 px-4 py-4">

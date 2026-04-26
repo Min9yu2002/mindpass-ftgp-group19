@@ -9,6 +9,7 @@ import {
 
 type DirectoryTherapist = {
   id: string;
+  walletAddress: string;
   name: string;
   specialty: string;
   bio: string;
@@ -83,13 +84,14 @@ function getModeBadgeClass(mode: DirectoryTherapist["mode"]) {
 
 export default async function TherapistsPage() {
   let therapists: DirectoryTherapist[] = [];
+  let directoryError = false;
 
   try {
     const supabase = createServerSupabaseClient();
     const { data, error } = await supabase
       .from("therapists")
       .select(
-        "id, full_name, legal_name, specialty, clinical_specialty, bio, languages, is_online, supported_modes, ekyc_status, sbt_minted",
+        "id, wallet_address, full_name, legal_name, specialty, clinical_specialty, bio, languages, is_online, supported_modes, ekyc_status, sbt_minted",
       )
       .order("is_online", { ascending: false })
       .order("rating", { ascending: false });
@@ -111,6 +113,7 @@ export default async function TherapistsPage() {
 
           return {
             id: String(therapist.id),
+            walletAddress: String(therapist.wallet_address ?? ""),
             name: displayName,
             specialty: displaySpecialty,
             bio:
@@ -124,9 +127,12 @@ export default async function TherapistsPage() {
             mode: deriveModeLabel(supportedModes),
           };
         });
+    } else {
+      directoryError = true;
     }
   } catch {
     therapists = [];
+    directoryError = true;
   }
 
   return (
@@ -143,7 +149,7 @@ export default async function TherapistsPage() {
         <section className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
           {therapists.map((therapist) => (
             <GlassCard key={therapist.id} className="glass-panel flex h-full flex-col p-6">
-              <div className="flex min-h-[112px] items-start justify-between gap-4">
+              <div className="flex min-h-[116px] items-start justify-between gap-4">
                 <div className="min-w-0">
                   <h2 className="text-2xl font-semibold text-[var(--text-primary)]">
                     {therapist.name}
@@ -163,33 +169,39 @@ export default async function TherapistsPage() {
                 </span>
               </div>
 
-              <div className="mt-5 flex min-h-[46px] flex-wrap content-start gap-2">
+              <div className="mt-5 flex min-h-[52px] flex-wrap content-start gap-2">
                 <span
                   className={`rounded-full px-3 py-1 text-xs font-medium ${getModeBadgeClass(therapist.mode)}`}
                 >
                   {therapist.mode}
                 </span>
-                {therapist.languages.map((language) => (
-                  <span
-                    key={`${therapist.id}-${language}`}
-                    className="glass-chip-muted px-3 py-1 text-xs"
-                  >
-                    {language}
+                {therapist.languages.length > 0 ? (
+                  therapist.languages.map((language) => (
+                    <span
+                      key={`${therapist.id}-${language}`}
+                      className="glass-chip-muted px-3 py-1 text-xs"
+                    >
+                      {language}
+                    </span>
+                  ))
+                ) : (
+                  <span className="glass-chip-muted px-3 py-1 text-xs">
+                    Language syncing
                   </span>
-                ))}
+                )}
               </div>
 
-              <div className="mt-6 flex min-h-[188px] flex-1 flex-col">
+              <div className="mt-6 flex min-h-[196px] flex-1 flex-col">
                 <p className="text-xs uppercase tracking-[0.18em] text-[var(--text-faint)]">
                   Bio
                 </p>
-                <p className="mt-3 text-sm leading-7 text-[var(--text-secondary)]">
+                <p className="mt-3 flex-1 text-sm leading-7 text-[var(--text-secondary)]">
                   {therapist.bio}
                 </p>
               </div>
 
               <div className="mt-6">
-                <TherapistDirectoryCta />
+                <TherapistDirectoryCta therapistWallet={therapist.walletAddress} />
               </div>
             </GlassCard>
           ))}
@@ -197,11 +209,14 @@ export default async function TherapistsPage() {
           {therapists.length === 0 ? (
             <GlassCard className="glass-panel p-6 md:col-span-2 xl:col-span-3">
               <p className="text-lg font-semibold text-[var(--text-primary)]">
-                No verified therapists are available right now.
+                {directoryError
+                  ? "Unable to load verified therapists right now."
+                  : "No verified therapists are available right now."}
               </p>
               <p className="mt-3 max-w-2xl text-sm leading-7 text-[var(--text-muted)]">
-                The directory will populate automatically once verified therapist
-                profiles are available in Supabase.
+                {directoryError
+                  ? "Please refresh in a moment while the directory reconnects to Supabase."
+                  : "The directory will populate automatically once verified therapist profiles are available in Supabase."}
               </p>
             </GlassCard>
           ) : null}

@@ -31,7 +31,7 @@ export default function AuthTabs({ mode, onChange }: AuthTabsProps) {
 
   return (
     <div
-      className={`auth-switcher liquid-glass-soft auth-switcher--${mode}`}
+      className={`auth-switcher auth-switcher--${mode}`}
       style={{ ["--auth-tab-count" as string]: tabs.length }}
     >
       <div

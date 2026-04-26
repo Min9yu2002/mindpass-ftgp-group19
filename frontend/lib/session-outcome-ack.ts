@@ -1,6 +1,6 @@
 "use client";
 
-import type { DeadlineOutcomeStatus } from "./session-outcome.ts";
+import type { DeadlineOutcomeStatus } from "./session-outcome";
 
 const DEADLINE_OUTCOME_ACK_PREFIX = "mindpass-deadline-outcome-ack:v1";
 

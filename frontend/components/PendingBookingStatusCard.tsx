@@ -22,7 +22,7 @@ export default function PendingBookingStatusCard({
   actionDisabled = false,
 }: PendingBookingStatusCardProps) {
   return (
-    <div className="glass-panel liquid-glass-strong mb-6 rounded-[28px] border border-white/10 px-5 py-5">
+    <div className="glass-panel glass-panel--bottom-depth liquid-glass-strong mb-6 rounded-[28px] border border-white/10 px-5 py-5">
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div className="flex items-center gap-3">

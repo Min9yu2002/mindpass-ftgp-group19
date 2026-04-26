@@ -1,25 +1,47 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import {
+  readContract,
+  simulateContract,
+  waitForTransactionReceipt,
+  writeContract,
+} from "@wagmi/core";
 import GlassCard from "./GlassCard";
 import StatusBadge from "./StatusBadge";
-import {
-  PAYMENT_WINDOW_MS,
-  SESSION_FEE_ETH,
-} from "../lib/booking";
+import { SESSION_FEE_ETH } from "../lib/booking";
+import { buildBookingAcceptedPatch, buildBookingRejectedPatch } from "../lib/onchain-session-mapping";
 import { formatSessionMode } from "../lib/session-formatting";
+import {
+  findMindPassEscrowEvent,
+  MINDPASS_ESCROW_ABI,
+  MINDPASS_ESCROW_CHAIN_ID,
+  MINDPASS_ESCROW_DEPLOYMENT,
+  MINDPASS_ESCROW_STATUS,
+  normalizeMindPassEscrowSession,
+  prepareAcceptBooking,
+  prepareRejectBooking,
+} from "../lib/mindpassEscrow";
+import {
+  logEscrowDebug,
+  logMirrorSync,
+  logMirrorSyncError,
+  logReceiptDecode,
+} from "../lib/escrow-debug";
 import {
   normalizeSessionMode,
   normalizeSessionStatus,
   type SessionMode,
 } from "../lib/session-status";
 import { supabase } from "../lib/supabase";
+import { useAccount, useChainId, useConfig } from "wagmi";
 
 export const PROVIDER_REQUEST_UPDATED_EVENT =
   "mindpass-provider-request-updated";
 
 type ProviderIncomingRequest = {
   id: string;
+  onchainSessionId: string | null;
   patientWallet: string;
   createdAt: string;
   sessionMode: SessionMode;
@@ -31,8 +53,21 @@ type GlobalProviderIncomingRequestCardProps = {
   visible: boolean;
 };
 
+const IS_DEV = process.env.NODE_ENV !== "production";
+
+function logAcceptMirrorRecheck(
+  label: string,
+  payload: Record<string, unknown>,
+) {
+  if (!IS_DEV) {
+    return;
+  }
+
+  console.debug("[accept-mirror-recheck]", label, payload);
+}
+
 const GLOBAL_PROVIDER_REQUEST_SELECT =
-  "id, therapist_wallet, patient_wallet, status, created_at, session_mode, session_fee_eth, escrow_amount, amount_eth";
+  "id, onchain_session_id, therapist_wallet, patient_wallet, status, created_at, session_mode, session_fee_eth, escrow_amount, amount_eth";
 
 function truncateWallet(value: string) {
   if (!value) {
@@ -77,6 +112,10 @@ function normalizeIncomingRequest(
 
   return {
     id: String(row.id ?? ""),
+    onchainSessionId:
+      row.onchain_session_id === null || row.onchain_session_id === undefined
+        ? null
+        : String(row.onchain_session_id),
     patientWallet: String(row.patient_wallet ?? "").toLowerCase(),
     createdAt: String(row.created_at ?? ""),
     sessionMode: normalizeSessionMode(row.session_mode),
@@ -90,6 +129,9 @@ export default function GlobalProviderIncomingRequestCard({
   therapistWallet,
   visible,
 }: GlobalProviderIncomingRequestCardProps) {
+  const { address, isConnected, status: accountStatus } = useAccount();
+  const chainId = useChainId();
+  const wagmiConfig = useConfig();
   const normalizedTherapistWallet = useMemo(
     () => String(therapistWallet ?? "").trim().toLowerCase(),
     [therapistWallet],
@@ -99,6 +141,96 @@ export default function GlobalProviderIncomingRequestCard({
   const [errorMessage, setErrorMessage] = useState("");
   const [actionState, setActionState] = useState<"accept" | "decline" | "">("");
   const [refreshNonce, setRefreshNonce] = useState(0);
+
+  const readIncomingCardChainSession = async (onchainSessionId: string) => {
+    const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+    if (!contractAddress) {
+      return null;
+    }
+
+    return normalizeMindPassEscrowSession(
+      (await readContract(wagmiConfig, {
+        address: contractAddress,
+        abi: MINDPASS_ESCROW_ABI,
+        functionName: "sessions",
+        args: [BigInt(onchainSessionId)],
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+      })) as readonly unknown[],
+    );
+  };
+
+  const selfHealIncomingRequestedCard = async (
+    currentRequest: ProviderIncomingRequest | null,
+    source: "incoming-card",
+  ) => {
+    if (!currentRequest || !currentRequest.onchainSessionId || !supabase) {
+      return currentRequest;
+    }
+
+    logAcceptMirrorRecheck("requested_card_chain_recheck_started", {
+      sessionId: currentRequest.id,
+      onchainSessionId: currentRequest.onchainSessionId,
+      dbStatus: "requested",
+      chainStatus: null,
+      txHash: null,
+      source,
+      recoveryApplied: false,
+    });
+
+    const chainSession = await readIncomingCardChainSession(
+      currentRequest.onchainSessionId,
+    );
+    logAcceptMirrorRecheck("requested_card_chain_recheck_result", {
+      sessionId: currentRequest.id,
+      onchainSessionId: currentRequest.onchainSessionId,
+      dbStatus: "requested",
+      chainStatus: chainSession?.status ?? null,
+      txHash: null,
+      source,
+      recoveryApplied: false,
+    });
+
+    if (
+      !chainSession ||
+      chainSession.status !== MINDPASS_ESCROW_STATUS.AcceptedAwaitingPayment
+    ) {
+      return currentRequest;
+    }
+
+    const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+    if (!contractAddress) {
+      return currentRequest;
+    }
+
+    const { error } = await supabase
+      .from("sessions")
+      .update(
+        buildBookingAcceptedPatch({
+          acceptedAt: chainSession.providerAcceptedAt,
+          paymentDueAt: chainSession.paymentDueAt,
+          contractAddress,
+          chainId: MINDPASS_ESCROW_CHAIN_ID,
+        }),
+      )
+      .eq("id", currentRequest.id)
+      .eq("onchain_session_id", currentRequest.onchainSessionId);
+
+    if (error) {
+      return currentRequest;
+    }
+
+    logAcceptMirrorRecheck("requested_row_self_healed", {
+      sessionId: currentRequest.id,
+      onchainSessionId: currentRequest.onchainSessionId,
+      dbStatus: "requested",
+      chainStatus: chainSession.status,
+      txHash: null,
+      source,
+      recoveryApplied: true,
+    });
+
+    return null;
+  };
 
   useEffect(() => {
     if (!shouldShow) {
@@ -129,7 +261,12 @@ export default function GlobalProviderIncomingRequestCard({
         return;
       }
 
-      setRequest(normalizeIncomingRequest(data as Record<string, unknown> | null));
+      const normalizedRequest = normalizeIncomingRequest(
+        data as Record<string, unknown> | null,
+      );
+      setRequest(
+        await selfHealIncomingRequestedCard(normalizedRequest, "incoming-card"),
+      );
     };
 
     void loadLatestRequest();
@@ -203,42 +340,264 @@ export default function GlobalProviderIncomingRequestCard({
       return;
     }
 
-    const now = new Date();
-    const updatePayload =
-      nextStatus === "accepted"
-        ? {
-            status: "accepted_awaiting_payment",
-            provider_accepted_at: now.toISOString(),
-            payment_due_at: new Date(
-              now.getTime() + PAYMENT_WINDOW_MS,
-            ).toISOString(),
-            settlement_status: "awaiting_patient_payment",
-          }
-        : {
-            status: "rejected",
-            rejected_at: now.toISOString(),
-            settlement_status: "cancelled",
-          };
-
     setActionState(nextStatus === "accepted" ? "accept" : "decline");
     setErrorMessage("");
 
-    const { error } = await supabase
-      .from("sessions")
-      .update(updatePayload)
-      .eq("id", request.id)
-      .eq("status", "requested");
+    try {
+      if (!address || !isConnected || accountStatus !== "connected") {
+        setErrorMessage("Connect the therapist wallet before reviewing requests.");
+        setActionState("");
+        return;
+      }
 
-    if (error) {
-      setErrorMessage(error.message);
+      if (address.toLowerCase() !== normalizedTherapistWallet) {
+        setErrorMessage("Connect the therapist wallet for this provider profile.");
+        setActionState("");
+        return;
+      }
+
+      if (chainId !== MINDPASS_ESCROW_CHAIN_ID) {
+        setErrorMessage("Switch to Sepolia before reviewing requests.");
+        setActionState("");
+        return;
+      }
+
+      if (!request.onchainSessionId) {
+        setErrorMessage("This booking is missing an on-chain session id.");
+        setActionState("");
+        return;
+      }
+
+      const chainSessionBeforeDecision = await readIncomingCardChainSession(
+        request.onchainSessionId,
+      );
+      logAcceptMirrorRecheck(
+        nextStatus === "accepted"
+          ? "pre_accept_chain_recheck_result"
+          : "pre_reject_chain_recheck_result",
+        {
+          sessionId: request.id,
+          onchainSessionId: request.onchainSessionId,
+          dbStatus: "requested",
+          chainStatus: chainSessionBeforeDecision?.status ?? null,
+          txHash: null,
+          source: "incoming-card",
+          recoveryApplied: false,
+        },
+      );
+
+      if (
+        chainSessionBeforeDecision &&
+        chainSessionBeforeDecision.status !== MINDPASS_ESCROW_STATUS.Requested
+      ) {
+        await selfHealIncomingRequestedCard(request, "incoming-card");
+        setErrorMessage(
+          "This request has already moved forward on-chain. Refreshing session state.",
+        );
+        setRequest(null);
+        setActionState("");
+        setRefreshNonce((current) => current + 1);
+        return;
+      }
+
+      const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+      if (!contractAddress) {
+        setErrorMessage("The MindPass escrow contract is not configured in this app.");
+        setActionState("");
+        return;
+      }
+
+      const sessionId = BigInt(request.onchainSessionId);
+      const preparedRequest =
+        nextStatus === "accepted"
+          ? prepareAcceptBooking({
+              address: contractAddress,
+              sessionId,
+            })
+          : prepareRejectBooking({
+              address: contractAddress,
+              sessionId,
+            });
+
+      logEscrowDebug("submitting provider booking decision", {
+        source: "GlobalProviderIncomingRequestCard",
+        sessionId: request.id,
+        onchainSessionId: request.onchainSessionId,
+        functionName: preparedRequest.functionName,
+      });
+
+      const { request: simulatedRequest } = await simulateContract(wagmiConfig, {
+        address: preparedRequest.address,
+        abi: preparedRequest.abi,
+        functionName: preparedRequest.functionName,
+        args: preparedRequest.args,
+        chainId: preparedRequest.chainId,
+        account: address,
+      });
+
+      const hash = await writeContract(wagmiConfig, {
+        ...simulatedRequest,
+        address: preparedRequest.address,
+        abi: preparedRequest.abi,
+        functionName: preparedRequest.functionName,
+        args: preparedRequest.args,
+        chainId: preparedRequest.chainId,
+      });
+      const receipt = await waitForTransactionReceipt(wagmiConfig, {
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+        hash,
+      });
+      logReceiptDecode({
+        context: "provider booking decision receipt decoded",
+        txHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+        logs: receipt.logs,
+      });
+
+      const recoverAcceptedPatchFromChain = async () => {
+        logAcceptMirrorRecheck("accept_receipt_recovery_started", {
+          sessionId: request.id,
+          onchainSessionId: request.onchainSessionId,
+          dbStatus: "requested",
+          chainStatus: null,
+          txHash: receipt.transactionHash,
+          source: "incoming-card",
+          recoveryApplied: false,
+        });
+        const chainSession = normalizeMindPassEscrowSession(
+          (await readContract(wagmiConfig, {
+            address: contractAddress,
+            abi: MINDPASS_ESCROW_ABI,
+            functionName: "sessions",
+            args: [sessionId],
+            chainId: MINDPASS_ESCROW_CHAIN_ID,
+          })) as readonly unknown[],
+        );
+
+        if (chainSession.status !== MINDPASS_ESCROW_STATUS.AcceptedAwaitingPayment) {
+          return null;
+        }
+
+        return buildBookingAcceptedPatch({
+          acceptedAt: chainSession.providerAcceptedAt,
+          paymentDueAt: chainSession.paymentDueAt,
+          contractAddress,
+          chainId: MINDPASS_ESCROW_CHAIN_ID,
+          txHash: receipt.transactionHash,
+          blockNumber: receipt.blockNumber,
+        });
+      };
+
+      const acceptedPatch =
+        nextStatus === "accepted"
+          ? await (async () => {
+              const event = findMindPassEscrowEvent(receipt.logs, "BookingAccepted");
+
+              if (event) {
+                return buildBookingAcceptedPatch({
+                  acceptedAt: event.args.providerAcceptedAt,
+                  paymentDueAt: event.args.paymentDueAt,
+                  contractAddress,
+                  chainId: MINDPASS_ESCROW_CHAIN_ID,
+                  txHash: receipt.transactionHash,
+                  blockNumber: receipt.blockNumber,
+                });
+              }
+
+              return recoverAcceptedPatchFromChain();
+            })()
+          : null;
+
+      const updatePayload =
+        acceptedPatch ??
+        buildBookingRejectedPatch({
+          contractAddress,
+          chainId: MINDPASS_ESCROW_CHAIN_ID,
+          txHash: receipt.transactionHash,
+          blockNumber: receipt.blockNumber,
+        });
+
+      if (nextStatus === "accepted") {
+        const { data, error } = await supabase
+          .from("sessions")
+          .update(updatePayload)
+          .eq("id", request.id)
+          .eq("onchain_session_id", request.onchainSessionId)
+          .eq("status", "requested")
+          .select(GLOBAL_PROVIDER_REQUEST_SELECT)
+          .maybeSingle();
+
+        if (error || !data) {
+          const recoveredPatch = acceptedPatch ?? (await recoverAcceptedPatchFromChain());
+          const { data: recoveredData, error: recoveredError } = await supabase
+            .from("sessions")
+            .update(recoveredPatch ?? updatePayload)
+            .eq("id", request.id)
+            .eq("onchain_session_id", request.onchainSessionId)
+            .select(GLOBAL_PROVIDER_REQUEST_SELECT)
+            .maybeSingle();
+
+          if (recoveredError || !recoveredData) {
+            logMirrorSyncError("provider booking decision mirror sync failed", {
+              source: "GlobalProviderIncomingRequestCard",
+              sessionId: request.id,
+              onchainSessionId: request.onchainSessionId,
+              txHash: receipt.transactionHash,
+              message:
+                error?.message ??
+                recoveredError?.message ??
+                "Accept mirror fallback matched no row.",
+            });
+            setErrorMessage(
+              "The on-chain request decision succeeded, but the session record could not be synced. Please refresh.",
+            );
+            setActionState("");
+            return;
+          }
+        }
+      } else {
+        const { error } = await supabase
+          .from("sessions")
+          .update(updatePayload)
+          .eq("id", request.id)
+          .eq("onchain_session_id", request.onchainSessionId)
+          .eq("status", "requested");
+
+        if (error) {
+          logMirrorSyncError("provider booking decision mirror sync failed", {
+            source: "GlobalProviderIncomingRequestCard",
+            sessionId: request.id,
+            onchainSessionId: request.onchainSessionId,
+            txHash: receipt.transactionHash,
+            message: error.message,
+          });
+          setErrorMessage(
+            "The on-chain request decision succeeded, but the session record could not be synced. Please refresh.",
+          );
+          setActionState("");
+          return;
+        }
+      }
+
+      logMirrorSync("provider booking decision mirror sync complete", {
+        source: "GlobalProviderIncomingRequestCard",
+        sessionId: request.id,
+        onchainSessionId: request.onchainSessionId,
+        txHash: receipt.transactionHash,
+        status: nextStatus,
+      });
+      setRequest(null);
       setActionState("");
-      return;
+      window.dispatchEvent(new Event(PROVIDER_REQUEST_UPDATED_EVENT));
+      setRefreshNonce((current) => current + 1);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to update this request right now.",
+      );
+      setActionState("");
     }
-
-    setRequest(null);
-    setActionState("");
-    window.dispatchEvent(new Event(PROVIDER_REQUEST_UPDATED_EVENT));
-    setRefreshNonce((current) => current + 1);
   };
 
   if (!shouldShow || !request) {

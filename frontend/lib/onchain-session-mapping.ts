@@ -4,6 +4,15 @@ export type HexHash = `0x${string}`;
 export const SEPOLIA_CHAIN_ID = 11155111;
 export const WEI_PER_ETH = 10n ** 18n;
 export const SESSION_FEE_WEI = 5_000_000_000_000_000n;
+const IS_DEV = process.env.NODE_ENV !== "production";
+
+function logPaymentWindow180(label: string, payload: Record<string, unknown>) {
+  if (!IS_DEV) {
+    return;
+  }
+
+  console.debug("[payment-window-180]", label, payload);
+}
 
 export type OnchainSessionStatus =
   | "None"
@@ -84,6 +93,7 @@ export type MindPassSessionSyncPatch = Partial<{
   provider_accepted_at: string;
   payment_due_at: string;
   funded_at: string;
+  no_show_deadline_at: string;
   patient_joined_at: string;
   therapist_joined_at: string;
   session_started_at: string;
@@ -92,6 +102,7 @@ export type MindPassSessionSyncPatch = Partial<{
   refund_amount_eth: string;
   patient_refund_eth: string;
   vault_refund_eth: string;
+  subsidy_refunded_eth: string;
   total_refund_eth: string;
   protocol_fee_eth: string;
   therapist_payout_eth: string;
@@ -285,6 +296,16 @@ export function buildSyncMetadata(input: {
   };
 }
 
+export function compactSessionSyncPatch(
+  patch: MindPassSessionSyncPatch,
+): MindPassSessionSyncPatch {
+  const compacted = Object.fromEntries(
+    Object.entries(patch).filter(([, value]) => value !== undefined),
+  );
+
+  return compacted as MindPassSessionSyncPatch;
+}
+
 export function getTxHashFieldForEvent(
   eventName: MindPassEscrowEventName,
 ): MindPassEscrowTxHashField | null {
@@ -306,6 +327,26 @@ function buildSharedFeeFields(
     session_fee_eth: fee,
     escrow_amount: fee,
   };
+}
+
+function deriveRefundSettlementStatus(input: {
+  patientRefundWei: bigint;
+  vaultRefundWei: bigint;
+  fallbackStatus: string;
+}) {
+  if (input.patientRefundWei > 0n && input.vaultRefundWei === 0n) {
+    return "refunded_to_patient";
+  }
+
+  if (input.patientRefundWei === 0n && input.vaultRefundWei > 0n) {
+    return "refunded_to_vault";
+  }
+
+  if (input.patientRefundWei > 0n && input.vaultRefundWei > 0n) {
+    return "refunded_split_patient_vault";
+  }
+
+  return input.fallbackStatus;
 }
 
 export function buildBookingRequestedPatch(input: {
@@ -357,6 +398,27 @@ export function buildBookingAcceptedPatch(input: {
   txHash?: string | null;
   blockNumber?: bigint | number | null;
 }): MindPassSessionSyncPatch {
+  const paymentDueAt = unixSecondsToIsoString(input.paymentDueAt) ?? undefined;
+  logPaymentWindow180("accepted_patch_computed", {
+    sessionId: null,
+    onchainSessionId: null,
+    status: "accepted_awaiting_payment",
+    paymentDueAt: paymentDueAt ?? null,
+    now: new Date().toISOString(),
+    remainingSeconds: null,
+    source: "buildBookingAcceptedPatch",
+    trigger: "booking_accepted",
+  });
+  logPaymentWindow180("payment_due_at_computed", {
+    sessionId: null,
+    onchainSessionId: null,
+    status: "accepted_awaiting_payment",
+    paymentDueAt: paymentDueAt ?? null,
+    now: new Date().toISOString(),
+    remainingSeconds: null,
+    source: "buildBookingAcceptedPatch",
+    trigger: "payment_due_at_from_event",
+  });
   return {
     ...buildSyncMetadata({
       contractAddress: input.contractAddress,
@@ -367,7 +429,7 @@ export function buildBookingAcceptedPatch(input: {
     }),
     status: "accepted_awaiting_payment",
     provider_accepted_at: unixSecondsToIsoString(input.acceptedAt) ?? undefined,
-    payment_due_at: unixSecondsToIsoString(input.paymentDueAt) ?? undefined,
+    payment_due_at: paymentDueAt,
     accept_booking_tx_hash: input.txHash ?? undefined,
   };
 }
@@ -548,9 +610,14 @@ export function buildPaymentTimeoutPatch(input: {
     payment_timeout_at: unixSecondsToIsoString(input.paymentTimeoutAt) ?? undefined,
     patient_refund_eth: weiToEthDecimalString(patientRefundWei),
     vault_refund_eth: weiToEthDecimalString(vaultRefundWei),
+    subsidy_refunded_eth: weiToEthDecimalString(vaultRefundWei),
     total_refund_eth: weiToEthDecimalString(totalRefundWei),
     refund_amount_eth: weiToEthDecimalString(totalRefundWei),
-    settlement_status: "cancelled",
+    settlement_status: deriveRefundSettlementStatus({
+      patientRefundWei,
+      vaultRefundWei,
+      fallbackStatus: "cancelled",
+    }),
     resolve_payment_timeout_tx_hash: input.txHash ?? undefined,
   };
 }
@@ -578,9 +645,14 @@ export function buildCancelledUnstartedPatch(input: {
     status: "cancelled_unstarted",
     patient_refund_eth: weiToEthDecimalString(patientRefundWei),
     vault_refund_eth: weiToEthDecimalString(vaultRefundWei),
+    subsidy_refunded_eth: weiToEthDecimalString(vaultRefundWei),
     total_refund_eth: weiToEthDecimalString(totalRefundWei),
     refund_amount_eth: weiToEthDecimalString(totalRefundWei),
-    settlement_status: "cancelled",
+    settlement_status: deriveRefundSettlementStatus({
+      patientRefundWei,
+      vaultRefundWei,
+      fallbackStatus: "cancelled",
+    }),
     cancel_unstarted_tx_hash: input.txHash ?? undefined,
   };
 }
@@ -612,8 +684,10 @@ export function buildPatientNoShowPatch(input: {
     penalty_fee_eth: weiToEthDecimalString(input.penaltyFeeWei),
     patient_refund_eth: weiToEthDecimalString(patientRefundWei),
     vault_refund_eth: weiToEthDecimalString(vaultRefundWei),
+    subsidy_refunded_eth: weiToEthDecimalString(vaultRefundWei),
     total_refund_eth: weiToEthDecimalString(totalRefundWei),
     refund_amount_eth: weiToEthDecimalString(totalRefundWei),
+    protocol_fee_eth: "0",
     settlement_status: "penalty_paid_to_therapist",
     resolve_no_show_tx_hash: input.txHash ?? undefined,
   };
@@ -642,9 +716,14 @@ export function buildTherapistNoShowPatch(input: {
     status: "therapist_no_show",
     patient_refund_eth: weiToEthDecimalString(patientRefundWei),
     vault_refund_eth: weiToEthDecimalString(vaultRefundWei),
+    subsidy_refunded_eth: weiToEthDecimalString(vaultRefundWei),
     total_refund_eth: weiToEthDecimalString(totalRefundWei),
     refund_amount_eth: weiToEthDecimalString(totalRefundWei),
-    settlement_status: "refunded_to_patient",
+    settlement_status: deriveRefundSettlementStatus({
+      patientRefundWei,
+      vaultRefundWei,
+      fallbackStatus: "cancelled",
+    }),
     resolve_no_show_tx_hash: input.txHash ?? undefined,
   };
 }
@@ -681,15 +760,33 @@ export function buildWithdrawalPatch(input: {
   beneficiary: "patient" | "therapist" | "vault" | "protocol";
   txHash: string;
 }): MindPassSessionSyncPatch {
+  const syncMetadata: MindPassSessionSyncPatch = {
+    last_onchain_event: "Withdrawal",
+    last_synced_tx_hash: input.txHash,
+    last_synced_at: new Date().toISOString(),
+  };
+
   if (input.beneficiary === "patient") {
-    return { patient_withdrawal_tx_hash: input.txHash };
+    return {
+      ...syncMetadata,
+      patient_withdrawal_tx_hash: input.txHash,
+    };
   }
   if (input.beneficiary === "therapist") {
-    return { therapist_withdrawal_tx_hash: input.txHash };
+    return {
+      ...syncMetadata,
+      therapist_withdrawal_tx_hash: input.txHash,
+    };
   }
   if (input.beneficiary === "vault") {
-    return { vault_withdrawal_tx_hash: input.txHash };
+    return {
+      ...syncMetadata,
+      vault_withdrawal_tx_hash: input.txHash,
+    };
   }
 
-  return { protocol_withdrawal_tx_hash: input.txHash };
+  return {
+    ...syncMetadata,
+    protocol_withdrawal_tx_hash: input.txHash,
+  };
 }

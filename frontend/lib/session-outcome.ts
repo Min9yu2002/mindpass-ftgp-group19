@@ -1,12 +1,12 @@
-import { getSettlementPreview, NO_SHOW_WINDOW_LABEL } from "./booking.ts";
-import type { SessionTone } from "./session-formatting.ts";
+import { getSettlementPreview, NO_SHOW_WINDOW_LABEL } from "./booking";
+import type { SessionTone } from "./session-formatting";
 import type {
   SessionWorkflowStatus,
   TerminalSessionStatus,
-} from "./session-status.ts";
-import { isTerminalSessionStatus } from "./session-status.ts";
+} from "./session-status";
+import { isTerminalSessionStatus } from "./session-status";
 
-export type { TerminalSessionStatus } from "./session-status.ts";
+export type { TerminalSessionStatus } from "./session-status";
 
 export const DEADLINE_OUTCOME_STATUSES = [
   "patient_no_show",

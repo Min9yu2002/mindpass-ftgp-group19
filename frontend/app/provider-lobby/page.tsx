@@ -1,9 +1,15 @@
 "use client";
 
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import {
+  readContract,
+  simulateContract,
+  waitForTransactionReceipt,
+  writeContract,
+} from "@wagmi/core";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useAccount } from "wagmi";
+import { useAccount, useChainId, useConfig } from "wagmi";
 import GlassCard from "../../components/GlassCard";
 import { PROVIDER_REQUEST_UPDATED_EVENT } from "../../components/GlobalProviderIncomingRequestCard";
 import LiquidToggle from "../../components/LiquidToggle";
@@ -14,16 +20,40 @@ import SessionReadyModal from "../../components/SessionReadyModal";
 import StatusBadge from "../../components/StatusBadge";
 import SupportRequestModal from "../../components/SupportRequestModal";
 import {
+  getPaymentWindowRemainingSeconds,
   NORMAL_THERAPIST_PAYOUT_ETH,
-  PAYMENT_WINDOW_MS,
   PLATFORM_FEE_ETH,
   SESSION_FEE_ETH,
 } from "../../lib/booking";
+import {
+  buildBookingAcceptedPatch,
+  buildBookingRejectedPatch,
+  buildSessionFundedPatch,
+  compactSessionSyncPatch,
+} from "../../lib/onchain-session-mapping";
 import {
   formatProviderQueueStatusLabel,
   formatProviderQueueStatusTone,
   formatSessionMode,
 } from "../../lib/session-formatting";
+import {
+  findMindPassEscrowEvent,
+  MINDPASS_ESCROW_ABI,
+  MINDPASS_ESCROW_CHAIN_ID,
+  MINDPASS_ESCROW_DEPLOYMENT,
+  MINDPASS_ESCROW_STATUS,
+  normalizeMindPassEscrowSession,
+  prepareAcceptBooking,
+  prepareRejectBooking,
+  prepareResolveNoShow,
+  prepareResolvePaymentTimeout,
+} from "../../lib/mindpassEscrow";
+import {
+  logEscrowDebug,
+  logMirrorSync,
+  logMirrorSyncError,
+  logReceiptDecode,
+} from "../../lib/escrow-debug";
 import { usePageSessionGuard } from "../../lib/session-guard";
 import {
   isAcceptedAwaitingPaymentStatus,
@@ -35,9 +65,12 @@ import {
   type SessionMode,
 } from "../../lib/session-status";
 import {
-  getNoShowCatchUpSettlement,
-  shouldCatchPaymentTimeout,
-} from "../../lib/session-transition-guards";
+  buildResolutionPatchFromEvent,
+  buildResolutionPatchFromChainSession,
+  type EscrowResolutionEventInput,
+  getEscrowResolutionKind,
+  isTerminalEscrowResolutionStatus,
+} from "../../lib/escrow-resolution";
 import {
   getTerminalSessionOutcome,
   isDeadlineOutcomeStatus,
@@ -65,6 +98,7 @@ type TherapistRecord = {
 
 type RequestedSession = {
   id: string;
+  onchainSessionId: string | null;
   patientWallet: string;
   patientAlias: string;
   amountEth: number;
@@ -91,8 +125,29 @@ type OutcomeModalContext = {
   ackKey: string;
 };
 
+const IS_DEV = process.env.NODE_ENV !== "production";
+
+function logAcceptMirrorRecheck(
+  label: string,
+  payload: Record<string, unknown>,
+) {
+  if (!IS_DEV) {
+    return;
+  }
+
+  console.debug("[accept-mirror-recheck]", label, payload);
+}
+
+function logPaymentWindow180(label: string, payload: Record<string, unknown>) {
+  if (!IS_DEV) {
+    return;
+  }
+
+  console.debug("[payment-window-180]", label, payload);
+}
+
 const PROVIDER_REQUEST_SELECT =
-  "id, patient_wallet, therapist_wallet, status, created_at, updated_at, session_mode, session_fee_eth, escrow_amount, amount_eth, payment_due_at, no_show_deadline_at, patient_joined_at, therapist_joined_at";
+  "id, onchain_session_id, patient_wallet, therapist_wallet, status, created_at, updated_at, session_mode, session_fee_eth, escrow_amount, amount_eth, payment_due_at, no_show_deadline_at, patient_joined_at, therapist_joined_at";
 
 function truncateWallet(value: string) {
   if (!value) {
@@ -148,6 +203,10 @@ function normalizeRequestedSession(row: Record<string, unknown>): RequestedSessi
 
   return {
     id: String(row.id ?? ""),
+    onchainSessionId:
+      row.onchain_session_id === null || row.onchain_session_id === undefined
+        ? null
+        : String(row.onchain_session_id),
     patientWallet,
     patientAlias: truncateWallet(patientWallet),
     amountEth: Number(
@@ -202,93 +261,14 @@ function deriveSupportedModes(record: Record<string, unknown> | null | undefined
 }
 
 async function applyProviderSessionCatchUp(session: RequestedSession) {
-  if (!supabase) {
-    return session;
-  }
-
-  if (shouldCatchPaymentTimeout(session)) {
-    const { data, error } = await supabase
-      .from("sessions")
-      .update({
-        status: "payment_timeout",
-        payment_timeout_at: new Date().toISOString(),
-        no_show_deadline_at: null,
-        settlement_status: "cancelled",
-      })
-      .eq("id", session.id)
-      .eq("status", "accepted_awaiting_payment")
-      .select(PROVIDER_REQUEST_SELECT)
-      .maybeSingle();
-
-    if (error) {
-      console.error("Failed to catch up payment timeout in provider lobby", error);
-      return session;
-    }
-
-    if (!data) {
-      return null;
-    }
-
-    return null;
-  }
-
-  const settlement = getNoShowCatchUpSettlement(session);
-
-  if (!settlement) {
-    return session;
-  }
-
-  const { data, error } = await supabase
-    .from("sessions")
-    .update(settlement)
-    .eq("id", session.id)
-    .eq("status", "funded")
-    .select(PROVIDER_REQUEST_SELECT)
-    .maybeSingle();
-
-  if (error) {
-    console.error("Failed to catch up funded no-show in provider lobby", error);
-    return session;
-  }
-
-  if (!data) {
-    return null;
-  }
-
-  return null;
-}
-
-async function applyTherapistOverdueFundedCatchUps(therapistWallet: string) {
-  if (!supabase) {
-    return;
-  }
-
-  const { data, error } = await supabase
-    .from("sessions")
-    .select(PROVIDER_REQUEST_SELECT)
-    .ilike("therapist_wallet", therapistWallet)
-    .eq("status", "funded")
-    .is("session_started_at", null)
-    .not("no_show_deadline_at", "is", null)
-    .lte("no_show_deadline_at", new Date().toISOString())
-    .order("no_show_deadline_at", { ascending: true });
-
-  if (error) {
-    console.error(
-      "Failed to load overdue funded sessions in provider lobby",
-      error,
-    );
-    return;
-  }
-
-  for (const row of (data ?? []) as Record<string, unknown>[]) {
-    await applyProviderSessionCatchUp(normalizeRequestedSession(row));
-  }
+  return session;
 }
 
 export default function ProviderLobbyPage() {
   const router = useRouter();
   const { address, status: accountStatus } = useAccount();
+  const chainId = useChainId();
+  const wagmiConfig = useConfig();
   const sessionGuard = usePageSessionGuard({
     requiredRole: "therapist",
     address,
@@ -328,6 +308,8 @@ export default function ProviderLobbyPage() {
   const [errorMessage, setErrorMessage] = useState("");
   const [settingsMessage, setSettingsMessage] = useState("");
   const [sessionRefreshNonce, setSessionRefreshNonce] = useState(0);
+  const [resolutionNow, setResolutionNow] = useState(() => Date.now());
+  const [resolvingSessionId, setResolvingSessionId] = useState<string | null>(null);
   const sessionEndNotifications = useSessionEndRequestNotifications({
     walletAddress: therapistWallet,
     enabled: isAuthorized,
@@ -336,6 +318,127 @@ export default function ProviderLobbyPage() {
   const deadlineOutcomeModalCopy = deadlineOutcomeModal
     ? getTerminalSessionOutcome(deadlineOutcomeModal.status, true)
     : null;
+
+  const readProviderChainSession = async (onchainSessionId: string) => {
+    const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+    if (!contractAddress) {
+      return null;
+    }
+
+    return normalizeMindPassEscrowSession(
+      (await readContract(wagmiConfig, {
+        address: contractAddress,
+        abi: MINDPASS_ESCROW_ABI,
+        functionName: "sessions",
+        args: [BigInt(onchainSessionId)],
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+      })) as readonly unknown[],
+    );
+  };
+
+  const selfHealRequestedSession = async (
+    session: RequestedSession,
+    source: "provider-lobby",
+    txHash?: string,
+  ) => {
+    if (!supabase || session.status !== "requested" || !session.onchainSessionId) {
+      return session;
+    }
+
+    logAcceptMirrorRecheck("requested_card_chain_recheck_started", {
+      sessionId: session.id,
+      onchainSessionId: session.onchainSessionId,
+      dbStatus: session.status,
+      chainStatus: null,
+      txHash: txHash ?? null,
+      source,
+      recoveryApplied: false,
+    });
+
+    const chainSession = await readProviderChainSession(session.onchainSessionId);
+    logAcceptMirrorRecheck("requested_card_chain_recheck_result", {
+      sessionId: session.id,
+      onchainSessionId: session.onchainSessionId,
+      dbStatus: session.status,
+      chainStatus: chainSession?.status ?? null,
+      txHash: txHash ?? null,
+      source,
+      recoveryApplied: false,
+    });
+
+    if (
+      !chainSession ||
+      chainSession.status !== MINDPASS_ESCROW_STATUS.AcceptedAwaitingPayment
+    ) {
+      return session;
+    }
+
+    logAcceptMirrorRecheck("route_session_status_mismatch", {
+      sessionId: session.id,
+      onchainSessionId: session.onchainSessionId,
+      dbStatus: session.status,
+      chainStatus: chainSession.status,
+      txHash: txHash ?? null,
+      source,
+      recoveryApplied: false,
+    });
+
+    const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+    if (!contractAddress) {
+      return session;
+    }
+
+    logAcceptMirrorRecheck("accept_receipt_recovery_from_chain", {
+      sessionId: session.id,
+      onchainSessionId: session.onchainSessionId,
+      dbStatus: session.status,
+      chainStatus: chainSession.status,
+      txHash: txHash ?? null,
+      source,
+      recoveryApplied: true,
+    });
+
+    const { data, error } = await supabase
+      .from("sessions")
+      .update(
+        buildBookingAcceptedPatch({
+          acceptedAt: chainSession.providerAcceptedAt,
+          paymentDueAt: chainSession.paymentDueAt,
+          contractAddress,
+          chainId: MINDPASS_ESCROW_CHAIN_ID,
+          txHash: txHash ?? null,
+        }),
+      )
+      .eq("id", session.id)
+      .eq("onchain_session_id", session.onchainSessionId)
+      .select(PROVIDER_REQUEST_SELECT)
+      .maybeSingle();
+
+    if (error || !data) {
+      return session;
+    }
+
+    logAcceptMirrorRecheck("accept_receipt_recovery_supabase_updated", {
+      sessionId: session.id,
+      onchainSessionId: session.onchainSessionId,
+      dbStatus: session.status,
+      chainStatus: chainSession.status,
+      txHash: txHash ?? null,
+      source,
+      recoveryApplied: true,
+    });
+    logAcceptMirrorRecheck("requested_row_self_healed", {
+      sessionId: session.id,
+      onchainSessionId: session.onchainSessionId,
+      dbStatus: session.status,
+      chainStatus: chainSession.status,
+      txHash: txHash ?? null,
+      source,
+      recoveryApplied: true,
+    });
+
+    return normalizeRequestedSession(data as Record<string, unknown>);
+  };
 
   const maybeOpenDeadlineOutcomeModal = useEffectEvent((
     session: { id: string; status: string; updatedAt?: string | null } | null,
@@ -470,8 +573,6 @@ export default function ProviderLobbyPage() {
       }
 
       setIsHydrating(true);
-      await applyTherapistOverdueFundedCatchUps(therapistWallet);
-
       const requestedQuery = supabase
         .from("sessions")
         .select(PROVIDER_REQUEST_SELECT)
@@ -519,7 +620,10 @@ export default function ProviderLobbyPage() {
           const normalizedSession = normalizeRequestedSession(
             session as Record<string, unknown>,
           );
-          return applyProviderSessionCatchUp(normalizedSession);
+          const caughtUpSession = await applyProviderSessionCatchUp(normalizedSession);
+          return caughtUpSession && caughtUpSession.status === "requested"
+            ? selfHealRequestedSession(caughtUpSession, "provider-lobby")
+            : caughtUpSession;
         }),
       );
 
@@ -772,26 +876,7 @@ export default function ProviderLobbyPage() {
         }
 
         return window.setTimeout(() => {
-          void (async () => {
-            const nextSession = await applyProviderSessionCatchUp(session);
-            if (
-              nextSession &&
-              isProviderQueueSessionStatus(nextSession.status)
-            ) {
-              setRequestedSessions((current) =>
-                upsertRequestedSession(current, nextSession),
-              );
-              return;
-            }
-
-            setRequestedSessions((current) =>
-              current.filter((currentSession) => currentSession.id !== session.id),
-            );
-            setActiveRequestSession((current) =>
-              current?.id === session.id ? null : current,
-            );
-            setSessionRefreshNonce((current) => current + 1);
-          })();
+          setResolutionNow(Date.now());
         }, Math.max(0, deadline - Date.now()));
       })
       .filter((timeoutId): timeoutId is number => timeoutId !== null);
@@ -898,65 +983,671 @@ const handleSessionDecision = async (
     return;
   }
 
-  const now = new Date();
-  const updatePayload =
-    nextStatus === "accepted"
-      ? {
-          status: "accepted_awaiting_payment",
-          provider_accepted_at: now.toISOString(),
-          payment_due_at: new Date(
-            now.getTime() + PAYMENT_WINDOW_MS,
-          ).toISOString(),
-          settlement_status: "awaiting_patient_payment",
-        }
-      : {
-          status: "rejected",
-          rejected_at: now.toISOString(),
-          settlement_status: "cancelled",
-        };
-
   setRequestActionId(session.id);
   setErrorMessage("");
 
-  const { data, error } = await supabase
-    .from("sessions")
-    .update(updatePayload)
-    .eq("id", session.id)
-    .eq("status", "requested")
-    .select(PROVIDER_REQUEST_SELECT)
-    .maybeSingle();
+  try {
+    if (!address || accountStatus !== "connected") {
+      setErrorMessage("Connect the therapist wallet before reviewing requests.");
+      setRequestActionId(null);
+      return;
+    }
 
-  if (error) {
-    setErrorMessage(error.message);
-    setRequestActionId(null);
-    return;
-  }
+    if (address.toLowerCase() !== therapistWallet.toLowerCase()) {
+      setErrorMessage("Connect the therapist wallet for this provider profile.");
+      setRequestActionId(null);
+      return;
+    }
 
-  if (!data) {
-    setErrorMessage("This request changed state. Refreshing the latest queue.");
+    if (chainId !== MINDPASS_ESCROW_CHAIN_ID) {
+      setErrorMessage("Switch to Sepolia before reviewing requests.");
+      setRequestActionId(null);
+      return;
+    }
+
+    if (!session.onchainSessionId) {
+      setErrorMessage("This booking is missing an on-chain session id.");
+      setRequestActionId(null);
+      return;
+    }
+
+    const chainSessionBeforeAction = await readProviderChainSession(
+      session.onchainSessionId,
+    );
+    logAcceptMirrorRecheck(
+      nextStatus === "accepted"
+        ? "pre_accept_chain_recheck_result"
+        : "pre_reject_chain_recheck_result",
+      {
+        sessionId: session.id,
+        onchainSessionId: session.onchainSessionId,
+        dbStatus: session.status,
+        chainStatus: chainSessionBeforeAction?.status ?? null,
+        txHash: null,
+        source: "provider-lobby",
+        recoveryApplied: false,
+      },
+    );
+
+    if (
+      chainSessionBeforeAction &&
+      chainSessionBeforeAction.status !== MINDPASS_ESCROW_STATUS.Requested
+    ) {
+      const recoveredSession = await selfHealRequestedSession(
+        session,
+        "provider-lobby",
+      );
+      setRequestedSessions((current) =>
+        current
+          .map((currentSession) =>
+            currentSession.id === session.id ? recoveredSession : currentSession,
+          )
+          .filter((currentSession) => currentSession.status === "requested"),
+      );
+      setErrorMessage(
+        "This request has already moved forward on-chain. Refreshing session state.",
+      );
+      setRequestActionId(null);
+      setSessionRefreshNonce((current) => current + 1);
+      return;
+    }
+
+    const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+    if (!contractAddress) {
+      setErrorMessage("The MindPass escrow contract is not configured in this app.");
+      setRequestActionId(null);
+      return;
+    }
+
+    const preparedRequest =
+      nextStatus === "accepted"
+        ? prepareAcceptBooking({
+            address: contractAddress,
+            sessionId: BigInt(session.onchainSessionId),
+          })
+        : prepareRejectBooking({
+            address: contractAddress,
+            sessionId: BigInt(session.onchainSessionId),
+          });
+    const onchainSessionIdValue = BigInt(session.onchainSessionId);
+
+    logEscrowDebug("submitting provider lobby decision", {
+      source: "provider-lobby",
+      sessionId: session.id,
+      onchainSessionId: session.onchainSessionId,
+      functionName: preparedRequest.functionName,
+    });
+
+    const { request: simulatedRequest } = await simulateContract(wagmiConfig, {
+      address: preparedRequest.address,
+      abi: preparedRequest.abi,
+      functionName: preparedRequest.functionName,
+      args: preparedRequest.args,
+      chainId: preparedRequest.chainId,
+      account: address,
+    });
+
+    const hash = await writeContract(wagmiConfig, {
+      ...simulatedRequest,
+      address: preparedRequest.address,
+      abi: preparedRequest.abi,
+      functionName: preparedRequest.functionName,
+      args: preparedRequest.args,
+      chainId: preparedRequest.chainId,
+    });
+    const receipt = await waitForTransactionReceipt(wagmiConfig, {
+      chainId: MINDPASS_ESCROW_CHAIN_ID,
+      hash,
+    });
+    logReceiptDecode({
+      context: "provider lobby booking decision receipt decoded",
+      txHash: receipt.transactionHash,
+      blockNumber: receipt.blockNumber,
+      logs: receipt.logs,
+    });
+
+    const recoverAcceptedPatchFromChain = async () => {
+      logAcceptMirrorRecheck("accept_receipt_recovery_started", {
+        sessionId: session.id,
+        onchainSessionId: session.onchainSessionId,
+        dbStatus: session.status,
+        chainStatus: null,
+        txHash: receipt.transactionHash,
+        source: "provider-lobby",
+        recoveryApplied: false,
+      });
+      const chainSession = normalizeMindPassEscrowSession(
+        (await readContract(wagmiConfig, {
+          address: contractAddress,
+          abi: MINDPASS_ESCROW_ABI,
+          functionName: "sessions",
+          args: [onchainSessionIdValue],
+          chainId: MINDPASS_ESCROW_CHAIN_ID,
+        })) as readonly unknown[],
+      );
+
+      if (chainSession.status !== MINDPASS_ESCROW_STATUS.AcceptedAwaitingPayment) {
+        return null;
+      }
+
+      return buildBookingAcceptedPatch({
+        acceptedAt: chainSession.providerAcceptedAt,
+        paymentDueAt: chainSession.paymentDueAt,
+        contractAddress,
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+        txHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+      });
+    };
+
+    const acceptedPatch =
+      nextStatus === "accepted"
+        ? await (async () => {
+            const event = findMindPassEscrowEvent(receipt.logs, "BookingAccepted");
+
+            if (event) {
+              return buildBookingAcceptedPatch({
+                acceptedAt: event.args.providerAcceptedAt,
+                paymentDueAt: event.args.paymentDueAt,
+                contractAddress,
+                chainId: MINDPASS_ESCROW_CHAIN_ID,
+                txHash: receipt.transactionHash,
+                blockNumber: receipt.blockNumber,
+              });
+            }
+
+            return recoverAcceptedPatchFromChain();
+          })()
+        : null;
+
+    const updatePayload =
+      acceptedPatch ??
+      buildBookingRejectedPatch({
+        contractAddress,
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+        txHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+      });
+
+    let data: Record<string, unknown> | null = null;
+
+    if (nextStatus === "accepted") {
+      const initialResult = await supabase
+        .from("sessions")
+        .update(updatePayload)
+        .eq("id", session.id)
+        .eq("onchain_session_id", session.onchainSessionId)
+        .eq("status", "requested")
+        .select(PROVIDER_REQUEST_SELECT)
+        .maybeSingle();
+
+      if (initialResult.error || !initialResult.data) {
+        const recoveredPatch = acceptedPatch ?? (await recoverAcceptedPatchFromChain());
+        const fallbackResult = await supabase
+          .from("sessions")
+          .update(recoveredPatch ?? updatePayload)
+          .eq("id", session.id)
+          .eq("onchain_session_id", session.onchainSessionId)
+          .select(PROVIDER_REQUEST_SELECT)
+          .maybeSingle();
+
+        if (fallbackResult.error || !fallbackResult.data) {
+          logMirrorSyncError("provider lobby mirror sync failed", {
+            sessionId: session.id,
+            onchainSessionId: session.onchainSessionId,
+            txHash: receipt.transactionHash,
+            message:
+              initialResult.error?.message ??
+              fallbackResult.error?.message ??
+              "Accept mirror fallback matched no row.",
+          });
+          setErrorMessage(
+            "The on-chain request decision succeeded, but the session record could not be synced. Please refresh.",
+          );
+          setRequestActionId(null);
+          return;
+        }
+
+        data = fallbackResult.data as Record<string, unknown>;
+      } else {
+        data = initialResult.data as Record<string, unknown>;
+      }
+    } else {
+      const { data: rejectData, error } = await supabase
+        .from("sessions")
+        .update(updatePayload)
+        .eq("id", session.id)
+        .eq("onchain_session_id", session.onchainSessionId)
+        .eq("status", "requested")
+        .select(PROVIDER_REQUEST_SELECT)
+        .maybeSingle();
+
+      if (error) {
+        logMirrorSyncError("provider lobby mirror sync failed", {
+          sessionId: session.id,
+          onchainSessionId: session.onchainSessionId,
+          txHash: receipt.transactionHash,
+          message: error.message,
+        });
+        setErrorMessage(
+          "The on-chain request decision succeeded, but the session record could not be synced. Please refresh.",
+        );
+        setRequestActionId(null);
+        return;
+      }
+
+      if (!rejectData) {
+        setErrorMessage("This request changed state. Refreshing the latest queue.");
+        setActiveRequestSession((current) =>
+          current?.id === session.id ? null : current,
+        );
+        setRequestActionId(null);
+        setSessionRefreshNonce((current) => current + 1);
+        return;
+      }
+
+      data = rejectData as Record<string, unknown>;
+    }
+
+    logMirrorSync("provider lobby mirror sync complete", {
+      sessionId: session.id,
+      onchainSessionId: session.onchainSessionId,
+      txHash: receipt.transactionHash,
+      status: nextStatus,
+    });
+    const normalizedSession = normalizeRequestedSession(data as Record<string, unknown>);
+    if (nextStatus === "accepted") {
+      setRequestedSessions((current) =>
+        upsertRequestedSession(current, normalizedSession),
+      );
+    } else {
+      setRequestedSessions((current) =>
+        current.filter((currentSession) => currentSession.id !== session.id),
+      );
+    }
+
     setActiveRequestSession((current) =>
       current?.id === session.id ? null : current,
     );
     setRequestActionId(null);
-    setSessionRefreshNonce((current) => current + 1);
+  } catch (error) {
+    setErrorMessage(
+      error instanceof Error
+        ? error.message
+        : "Unable to update this request right now.",
+    );
+    setRequestActionId(null);
+  }
+};
+
+const handleResolveSession = async (session: RequestedSession) => {
+  if (!supabase || resolvingSessionId) {
     return;
   }
 
-  const normalizedSession = normalizeRequestedSession(data as Record<string, unknown>);
-  if (nextStatus === "accepted") {
-    setRequestedSessions((current) =>
-      upsertRequestedSession(current, normalizedSession),
-    );
-  } else {
-    setRequestedSessions((current) =>
-      current.filter((currentSession) => currentSession.id !== session.id),
-    );
+  const client = supabase;
+  const resolutionKind = getEscrowResolutionKind(session, Date.now());
+  if (!resolutionKind) {
+    setErrorMessage("This session is not ready for on-chain resolution.");
+    return;
   }
 
-  setActiveRequestSession((current) =>
-    current?.id === session.id ? null : current,
-  );
-  setRequestActionId(null);
+  setResolvingSessionId(session.id);
+  setErrorMessage("");
+
+  try {
+    if (!address || accountStatus !== "connected") {
+      setErrorMessage("Connect the therapist wallet before resolving session outcomes.");
+      return;
+    }
+
+    if (address.toLowerCase() !== therapistWallet.toLowerCase()) {
+      setErrorMessage("Connect the therapist wallet for this provider profile.");
+      return;
+    }
+
+    if (chainId !== MINDPASS_ESCROW_CHAIN_ID) {
+      setErrorMessage("Wrong chain. Switch to Sepolia before resolving this escrow outcome.");
+      return;
+    }
+
+    if (!session.onchainSessionId) {
+      setErrorMessage("This booking is missing an on-chain session id.");
+      return;
+    }
+
+    const contractAddress = MINDPASS_ESCROW_DEPLOYMENT.address;
+    if (!contractAddress) {
+      setErrorMessage("The MindPass escrow contract is not configured in this app.");
+      return;
+    }
+
+    const onchainSessionId = BigInt(session.onchainSessionId);
+
+    const syncResolvedSession = async (options: {
+      chainSession?: ReturnType<typeof normalizeMindPassEscrowSession>;
+      resolutionEvent?: EscrowResolutionEventInput | null;
+      resolutionTxHash?: string | null;
+      blockNumber?: bigint | null;
+      alreadyResolved?: boolean;
+    }) => {
+      const chainSession =
+        options.chainSession ??
+        normalizeMindPassEscrowSession(
+          (await readContract(wagmiConfig, {
+            address: contractAddress,
+            abi: MINDPASS_ESCROW_ABI,
+            functionName: "sessions",
+            args: [onchainSessionId],
+            chainId: MINDPASS_ESCROW_CHAIN_ID,
+          })) as readonly unknown[],
+        );
+
+      const updatePatch = options.resolutionEvent
+        ? buildResolutionPatchFromEvent({
+            resolutionEvent: options.resolutionEvent,
+            contractAddress,
+            resolutionTxHash: options.resolutionTxHash,
+            blockNumber: options.blockNumber,
+          })
+        : buildResolutionPatchFromChainSession({
+            chainSession,
+            contractAddress,
+            resolutionTxHash: options.resolutionTxHash,
+            blockNumber: options.blockNumber,
+          });
+
+      if (!updatePatch) {
+        return;
+      }
+
+      const { error } = await client
+        .from("sessions")
+        .update(compactSessionSyncPatch(updatePatch))
+        .eq("id", session.id)
+        .eq("onchain_session_id", session.onchainSessionId);
+
+      if (error) {
+        logMirrorSyncError("provider lobby overdue resolution mirror sync failed", {
+          sessionId: session.id,
+          onchainSessionId: session.onchainSessionId,
+          txHash: options.resolutionTxHash ?? null,
+          message: error.message,
+        });
+        setErrorMessage(
+          options.resolutionTxHash
+            ? "Mirror sync failed after successful on-chain resolution. Please refresh."
+            : "This session is already resolved on-chain, but the mirror sync failed. Please refresh.",
+        );
+        return;
+      }
+
+      logMirrorSync("provider lobby overdue resolution mirror sync complete", {
+        sessionId: session.id,
+        onchainSessionId: session.onchainSessionId,
+        txHash: options.resolutionTxHash ?? null,
+        status: chainSession.status,
+        alreadyResolved: options.alreadyResolved ?? false,
+      });
+
+      setRequestedSessions((current) =>
+        current.filter((currentSession) => currentSession.id !== session.id),
+      );
+      setActiveRequestSession((current) =>
+        current?.id === session.id ? null : current,
+      );
+      setSessionRefreshNonce((current) => current + 1);
+    };
+
+    const syncFundedSession = async (options: {
+      chainSession?: ReturnType<typeof normalizeMindPassEscrowSession>;
+      txHash?: string | null;
+      blockNumber?: bigint | null;
+      alreadyFunded?: boolean;
+    }) => {
+      const chainSession =
+        options.chainSession ??
+        normalizeMindPassEscrowSession(
+          (await readContract(wagmiConfig, {
+            address: contractAddress,
+            abi: MINDPASS_ESCROW_ABI,
+            functionName: "sessions",
+            args: [onchainSessionId],
+            chainId: MINDPASS_ESCROW_CHAIN_ID,
+          })) as readonly unknown[],
+        );
+
+      const updatePatch = buildSessionFundedPatch({
+        walletFundedWei: chainSession.walletFundedWei,
+        subsidyFundedWei: chainSession.subsidyFundedWei,
+        fundedAt: chainSession.fundedAt,
+        noShowDeadlineAt: chainSession.noShowDeadlineAt,
+        contractAddress,
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+        txHash: options.txHash,
+        blockNumber: options.blockNumber,
+      });
+
+      const { data, error } = await client
+        .from("sessions")
+        .update(compactSessionSyncPatch(updatePatch))
+        .eq("id", session.id)
+        .eq("onchain_session_id", session.onchainSessionId)
+        .select(PROVIDER_REQUEST_SELECT)
+        .maybeSingle();
+
+      if (error) {
+        logMirrorSyncError("provider lobby funded timeout catch-up mirror sync failed", {
+          sessionId: session.id,
+          onchainSessionId: session.onchainSessionId,
+          txHash: options.txHash ?? null,
+          message: error.message,
+        });
+        setErrorMessage(
+          options.txHash
+            ? "Mirror sync failed after detecting that this session is already funded on-chain. Please refresh."
+            : "This session is already funded on-chain, but the mirror sync failed. Please refresh.",
+        );
+        return;
+      }
+
+      if (data) {
+        const nextSession = normalizeRequestedSession(data as Record<string, unknown>);
+        logMirrorSync("provider lobby funded timeout catch-up mirror sync complete", {
+          sessionId: nextSession.id,
+          onchainSessionId: nextSession.onchainSessionId,
+          txHash: options.txHash ?? null,
+          status: nextSession.status,
+          alreadyFunded: options.alreadyFunded ?? false,
+        });
+        setRequestedSessions((current) =>
+          upsertRequestedSession(current, nextSession),
+        );
+      }
+
+      setActiveRequestSession((current) =>
+        current?.id === session.id ? null : current,
+      );
+      setSessionRefreshNonce((current) => current + 1);
+    };
+
+    const chainSessionBefore = normalizeMindPassEscrowSession(
+      (await readContract(wagmiConfig, {
+        address: contractAddress,
+        abi: MINDPASS_ESCROW_ABI,
+        functionName: "sessions",
+        args: [onchainSessionId],
+        chainId: MINDPASS_ESCROW_CHAIN_ID,
+      })) as readonly unknown[],
+    );
+
+    logPaymentWindow180("payment_window_chain_recheck", {
+      sessionId: session.id,
+      onchainSessionId: session.onchainSessionId,
+      status: session.status,
+      paymentDueAt: session.paymentDueAt,
+      now: new Date().toISOString(),
+      remainingSeconds: getPaymentWindowRemainingSeconds(session.paymentDueAt),
+      source: "provider-lobby",
+      trigger: "resolve_preflight",
+    });
+
+    if (isTerminalEscrowResolutionStatus(chainSessionBefore.status)) {
+      await syncResolvedSession({
+        chainSession: chainSessionBefore,
+        alreadyResolved: true,
+      });
+      return;
+    }
+
+    if (chainSessionBefore.status === MINDPASS_ESCROW_STATUS.Funded) {
+      await syncFundedSession({
+        chainSession: chainSessionBefore,
+        alreadyFunded: true,
+      });
+      return;
+    }
+
+    const request =
+      resolutionKind === "payment_timeout"
+        ? prepareResolvePaymentTimeout({
+            address: contractAddress,
+            sessionId: onchainSessionId,
+          })
+        : prepareResolveNoShow({
+            address: contractAddress,
+            sessionId: onchainSessionId,
+          });
+
+    logEscrowDebug("submitting provider lobby overdue resolution", {
+      source: "provider-lobby",
+      sessionId: session.id,
+      onchainSessionId: session.onchainSessionId,
+      functionName: request.functionName,
+    });
+
+    let hash: `0x${string}`;
+    try {
+      const { request: simulatedRequest } = await simulateContract(wagmiConfig, {
+        address: request.address,
+        abi: request.abi,
+        functionName: request.functionName,
+        args: request.args,
+        chainId: request.chainId,
+        account: address,
+      });
+      hash = await writeContract(wagmiConfig, {
+        ...simulatedRequest,
+        address: request.address,
+        abi: request.abi,
+        functionName: request.functionName,
+        args: request.args,
+        chainId: request.chainId,
+      });
+    } catch (error) {
+      const chainSessionAfterFailure = normalizeMindPassEscrowSession(
+        (await readContract(wagmiConfig, {
+          address: contractAddress,
+          abi: MINDPASS_ESCROW_ABI,
+          functionName: "sessions",
+          args: [onchainSessionId],
+          chainId: MINDPASS_ESCROW_CHAIN_ID,
+        })) as readonly unknown[],
+      );
+
+      if (isTerminalEscrowResolutionStatus(chainSessionAfterFailure.status)) {
+        await syncResolvedSession({
+          chainSession: chainSessionAfterFailure,
+          alreadyResolved: true,
+        });
+        return;
+      }
+
+      if (chainSessionAfterFailure.status === MINDPASS_ESCROW_STATUS.Funded) {
+        await syncFundedSession({
+          chainSession: chainSessionAfterFailure,
+          alreadyFunded: true,
+        });
+        return;
+      }
+
+      throw error;
+    }
+
+    const receipt = await waitForTransactionReceipt(wagmiConfig, {
+      chainId: MINDPASS_ESCROW_CHAIN_ID,
+      hash,
+    });
+    logReceiptDecode({
+      context: "provider lobby overdue resolution receipt decoded",
+      txHash: receipt.transactionHash,
+      blockNumber: receipt.blockNumber,
+      logs: receipt.logs,
+    });
+
+    const resolutionEvent =
+      resolutionKind === "payment_timeout"
+        ? findMindPassEscrowEvent(receipt.logs, "PaymentTimedOut")
+        : findMindPassEscrowEvent(receipt.logs, "PatientNoShowResolved") ??
+          findMindPassEscrowEvent(receipt.logs, "TherapistNoShowResolved");
+
+    if (!resolutionEvent) {
+      throw new Error(
+        resolutionKind === "payment_timeout"
+          ? "Timeout resolution transaction succeeded, but the PaymentTimedOut event was missing."
+          : "No-show resolution transaction succeeded, but the no-show event was missing.",
+      );
+    }
+
+    await syncResolvedSession({
+      resolutionEvent: resolutionEvent as EscrowResolutionEventInput | null,
+      resolutionTxHash: receipt.transactionHash,
+      blockNumber: receipt.blockNumber,
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message.toLowerCase() : "";
+    if (
+      resolutionKind === "payment_timeout" &&
+      message.includes("paymentwindowstillopen")
+    ) {
+      logPaymentWindow180("payment_window_still_open_recovered", {
+        sessionId: session.id,
+        onchainSessionId: session.onchainSessionId,
+        status: session.status,
+        paymentDueAt: session.paymentDueAt,
+        now: new Date().toISOString(),
+        remainingSeconds: getPaymentWindowRemainingSeconds(session.paymentDueAt),
+        source: "provider-lobby",
+        trigger: "resolve_error_recovery",
+      });
+      setSessionRefreshNonce((current) => current + 1);
+      setErrorMessage(
+        "The payment window is still open on-chain. Continue waiting for patient funding confirmation or for the full payment window to pass.",
+      );
+      return;
+    }
+    if (
+      message.includes("user rejected") ||
+      message.includes("user denied") ||
+      message.includes("rejected the request") ||
+      message.includes("4001")
+    ) {
+      setErrorMessage(
+        resolutionKind === "payment_timeout"
+          ? "Wallet signing was cancelled. Payment timeout is still unresolved on-chain."
+          : "Wallet signing was cancelled. No-show is still unresolved on-chain.",
+      );
+    } else {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to resolve this escrow outcome right now.",
+      );
+    }
+  } finally {
+    setResolvingSessionId(null);
+  }
 };
 
   const displayName = therapist.displayName || truncateWallet(therapist.walletAddress);
@@ -1192,6 +1883,14 @@ const handleSessionDecision = async (
                     key={session.id}
                     className="liquid-glass-soft rounded-[24px] px-5 py-5"
                   >
+                    {(() => {
+                      const resolutionKind = getEscrowResolutionKind(
+                        session,
+                        resolutionNow,
+                      );
+                      const isResolvingSession = resolvingSessionId === session.id;
+
+                      return (
                     <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <p className="text-xs uppercase tracking-[0.18em] text-[var(--text-faint)]">
@@ -1218,12 +1917,16 @@ const handleSessionDecision = async (
                         </div>
                         {isAcceptedAwaitingPaymentStatus(session.status) ? (
                           <p className="mt-3 text-xs text-amber-700 dark:text-amber-200">
-                            Patient payment confirmation is still pending.
+                            {resolutionKind === "payment_timeout"
+                              ? "Payment window expired. Resolve the timeout on-chain."
+                              : "Patient payment confirmation is still pending."}
                           </p>
                         ) : null}
                         {session.status === "funded" ? (
                           <p className="mt-3 text-xs text-emerald-700 dark:text-emerald-300">
-                            Session funded. Waiting for both participants to enter.
+                            {resolutionKind === "no_show"
+                              ? "No-show deadline passed. Resolve the outcome on-chain."
+                              : "Session funded. Waiting for both participants to enter."}
                           </p>
                         ) : null}
                         {session.status === "in_session" ? (
@@ -1268,12 +1971,30 @@ const handleSessionDecision = async (
                             }`}
                           >
                             {isAcceptedAwaitingPaymentStatus(session.status)
-                              ? "Accepted. Waiting for patient payment."
+                              ? resolutionKind === "payment_timeout"
+                                ? "Payment deadline passed. Resolve timeout on-chain."
+                                : "Accepted. Waiting for patient payment."
                               : session.status === "funded"
-                                ? "Funding confirmed. Ready for chat entry."
+                                ? resolutionKind === "no_show"
+                                  ? "No-show deadline passed. Resolve the outcome on-chain."
+                                  : "Funding confirmed. Ready for chat entry."
                                 : "Session is currently in progress."}
                           </div>
-                          {isFundedOrLiveSessionStatus(session.status) && (
+                          {(resolutionKind === "payment_timeout" ||
+                            resolutionKind === "no_show") ? (
+                            <button
+                              type="button"
+                              disabled={isResolvingSession}
+                              onClick={() => void handleResolveSession(session)}
+                              className="button-primary inline-flex items-center justify-center rounded-full px-5 py-3 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {isResolvingSession
+                                ? "Resolving..."
+                                : resolutionKind === "payment_timeout"
+                                  ? "Resolve Timeout"
+                                  : "Resolve No-Show"}
+                            </button>
+                          ) : isFundedOrLiveSessionStatus(session.status) && (
                             <Link
                               href={`/chat?role=therapist&sessionId=${encodeURIComponent(
                                 session.id,
@@ -1286,6 +2007,8 @@ const handleSessionDecision = async (
                         </div>
                       )}
                     </div>
+                      );
+                    })()}
                   </div>
                 ))}
               </div>

@@ -85,7 +85,36 @@
   --shell-glow-2: rgba(16, 185, 129, 0.03);
   --shell-glow-3: rgba(255, 255, 255, 0.18);
   --body-gradient:
-    linear-gradient(180deg, #ffffff 0%, #f6f7f8 100%);
+    radial-gradient(circle at 14% 10%, rgba(255, 255, 255, 0.94), transparent 34%),
+    radial-gradient(circle at 86% 12%, rgba(16, 185, 129, 0.05), transparent 26%),
+    linear-gradient(180deg, #ffffff 0%, #f7f8fa 46%, #eef2f4 100%);
+  --body-atmosphere:
+    radial-gradient(circle at 10% 8%, color-mix(in srgb, white 86%, var(--shell-glow-1) 14%) 0%, transparent 44%),
+    radial-gradient(circle at 88% 10%, color-mix(in srgb, var(--accent-primary) 10%, white 14%) 0%, transparent 34%);
+  --body-atmosphere-secondary:
+    radial-gradient(circle at 52% 112%, color-mix(in srgb, var(--accent-primary) 8%, white 18%) 0%, transparent 38%),
+    radial-gradient(circle at 28% 78%, rgba(255, 255, 255, 0.22) 0%, transparent 34%);
+  --body-vignette:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.2) 0%, rgba(255, 255, 255, 0) 18%, rgba(17, 24, 39, 0.04) 100%);
+  --page-canvas-depth:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.22) 0%, transparent 56%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0) 28%, rgba(17, 24, 39, 0.04) 100%);
+  --page-canvas-violet-bloom:
+    radial-gradient(circle at 12% 10%, rgba(16, 185, 129, 0.08), transparent 32%),
+    radial-gradient(circle at 84% 16%, rgba(98, 120, 255, 0.08), transparent 28%),
+    radial-gradient(circle at 72% 82%, rgba(255, 255, 255, 0.12), transparent 34%);
+  --page-canvas-provider-bloom:
+    radial-gradient(circle at 84% 10%, rgba(16, 185, 129, 0.12), transparent 30%),
+    radial-gradient(circle at 18% 76%, rgba(74, 144, 226, 0.08), transparent 26%),
+    radial-gradient(circle at 52% 108%, rgba(255, 255, 255, 0.1), transparent 36%);
+  --page-canvas-soft-bloom:
+    radial-gradient(circle at 12% 10%, rgba(16, 185, 129, 0.1), transparent 30%),
+    radial-gradient(circle at 82% 18%, rgba(6, 182, 212, 0.06), transparent 26%),
+    radial-gradient(circle at 56% 108%, rgba(255, 255, 255, 0.1), transparent 34%);
+  --liquid-field-primary: rgba(16, 185, 129, 0.78);
+  --liquid-field-secondary: rgba(74, 144, 226, 0.48);
+  --liquid-field-tertiary: rgba(255, 255, 255, 0.96);
+  --liquid-field-quaternary: rgba(6, 182, 212, 0.34);
   --apple-glass-bg: rgba(255, 255, 255, 0.76);
   --apple-glass-border: rgba(0, 0, 0, 0.05);
   --apple-glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
@@ -170,10 +199,36 @@
   --shell-glow-2: rgba(98, 120, 255, 0.12);
   --shell-glow-3: rgba(255, 255, 255, 0.04);
   --body-gradient:
-    radial-gradient(circle at 10% 10%, rgba(129, 92, 255, 0.18), transparent 28%),
-    radial-gradient(circle at 85% 18%, rgba(98, 120, 255, 0.12), transparent 24%),
-    radial-gradient(circle at 50% 100%, rgba(255, 255, 255, 0.04), transparent 28%),
-    linear-gradient(180deg, #07080d 0%, #090b12 40%, #06070b 100%);
+    radial-gradient(circle at 12% 10%, rgba(129, 92, 255, 0.2), transparent 30%),
+    radial-gradient(circle at 86% 14%, rgba(98, 120, 255, 0.14), transparent 26%),
+    linear-gradient(180deg, #06070c 0%, #090b12 42%, #05060a 100%);
+  --body-atmosphere:
+    radial-gradient(circle at 10% 8%, color-mix(in srgb, var(--accent-primary) 34%, transparent) 0%, transparent 44%),
+    radial-gradient(circle at 88% 10%, rgba(98, 120, 255, 0.18), transparent 34%);
+  --body-atmosphere-secondary:
+    radial-gradient(circle at 54% 108%, rgba(255, 255, 255, 0.04) 0%, transparent 40%),
+    radial-gradient(circle at 72% 70%, color-mix(in srgb, var(--accent-primary) 16%, transparent) 0%, transparent 30%);
+  --body-vignette:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.01) 14%, rgba(0, 0, 0, 0.24) 100%);
+  --page-canvas-depth:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.06) 0%, transparent 56%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025) 0%, rgba(255, 255, 255, 0) 22%, rgba(0, 0, 0, 0.2) 100%);
+  --page-canvas-violet-bloom:
+    radial-gradient(circle at 12% 10%, rgba(129, 92, 255, 0.18), transparent 32%),
+    radial-gradient(circle at 84% 16%, rgba(98, 120, 255, 0.14), transparent 28%),
+    radial-gradient(circle at 72% 82%, rgba(255, 255, 255, 0.05), transparent 34%);
+  --page-canvas-provider-bloom:
+    radial-gradient(circle at 84% 10%, rgba(16, 185, 129, 0.14), transparent 30%),
+    radial-gradient(circle at 18% 76%, rgba(74, 144, 226, 0.1), transparent 26%),
+    radial-gradient(circle at 52% 108%, rgba(255, 255, 255, 0.04), transparent 36%);
+  --page-canvas-soft-bloom:
+    radial-gradient(circle at 12% 10%, rgba(116, 82, 255, 0.14), transparent 30%),
+    radial-gradient(circle at 80% 18%, rgba(74, 144, 226, 0.1), transparent 28%),
+    radial-gradient(circle at 56% 108%, rgba(255, 255, 255, 0.04), transparent 34%);
+  --liquid-field-primary: rgba(123, 97, 255, 0.76);
+  --liquid-field-secondary: rgba(98, 120, 255, 0.52);
+  --liquid-field-tertiary: rgba(16, 185, 129, 0.22);
+  --liquid-field-quaternary: rgba(255, 255, 255, 0.14);
   --apple-glass-bg: rgba(29, 29, 31, 0.7);
   --apple-glass-border: rgba(255, 255, 255, 0.08);
   --apple-glass-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);

@@ -33,6 +33,38 @@ export default function TherapistLoginPage() {
     }
 
     const normalizedAddress = address.toLowerCase();
+    if (typeof window !== "undefined") {
+      const activeSession =
+        window.localStorage.getItem("mindpass-active-session") ?? "";
+      const patientProfile = window.localStorage.getItem("mindpass-patient-profile");
+      const therapistProfile = window.localStorage.getItem(
+        "mindpass-therapist-profile",
+      );
+
+      if (activeSession === "patient" && patientProfile) {
+        return;
+      }
+
+      if (activeSession === "therapist" && therapistProfile) {
+        try {
+          const parsedProfile = JSON.parse(therapistProfile) as {
+            walletAddress?: string;
+          };
+          const storedWallet = String(parsedProfile.walletAddress ?? "").trim();
+
+          if (
+            storedWallet &&
+            storedWallet.toLowerCase() === normalizedAddress
+          ) {
+            router.replace("/provider-lobby");
+            return;
+          }
+        } catch {
+          // Ignore invalid stored profile and continue explicit verification.
+        }
+      }
+    }
+
     if (lastHandledAddressRef.current === normalizedAddress) {
       return;
     }
@@ -112,6 +144,7 @@ export default function TherapistLoginPage() {
             <SectionHeading
               eyebrow="Therapist Access"
               title="Verify your SBT and enter the provider network."
+              titleClassName="font-hero-syne"
               description="Connect the wallet that holds your therapist credential. We will verify your on-chain identity and route you to the correct workspace."
             />
 
@@ -127,7 +160,7 @@ export default function TherapistLoginPage() {
                       Web3 Auth Gateway
                     </div>
                     <div>
-                      <h1 className="text-3xl font-semibold text-[var(--text-primary)]">
+                      <h1 className="font-hero-syne text-3xl text-[var(--text-primary)]">
                         Connect Wallet &amp; Verify
                       </h1>
                       <p className="mt-3 max-w-xl text-base leading-7 text-[var(--text-muted)]">
@@ -179,7 +212,7 @@ export default function TherapistLoginPage() {
                 <p className="text-sm uppercase tracking-[0.24em] text-[var(--text-faint)]">
                   What happens next
                 </p>
-                <h2 className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
+                <h2 className="font-hero-syne mt-3 text-2xl text-[var(--text-primary)]">
                   Wallet-first provider verification
                 </h2>
               </div>
