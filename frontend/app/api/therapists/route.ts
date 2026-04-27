@@ -5,6 +5,9 @@ import {
   getTherapistDisplaySpecialty,
 } from "../../../lib/therapist-display";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 function normalizeLanguages(value: unknown) {
   if (Array.isArray(value)) {
     return value.filter((item): item is string => typeof item === "string");
@@ -27,53 +30,60 @@ function normalizeSupportedModes(value: unknown): ("Video" | "Text")[] {
       ? value.split(",")
       : [];
 
-  return values
+  const modes = values
     .map((item) => String(item).trim().toLowerCase())
     .filter(Boolean)
     .map((item) => {
-      if (item === "chat") {
-        return "Text";
+      if (item === "voice" || item === "video") {
+        return "Video";
       }
 
-      return item === "video" ? "Video" : "Text";
+      return "Text";
     })
     .filter((item, index, array) => array.indexOf(item) === index) as (
     | "Video"
     | "Text"
   )[];
+
+  return modes.length > 0 ? modes : ["Text"];
 }
 
 export async function GET() {
   try {
     const supabase = createServerSupabaseClient();
+
     const { data, error } = await supabase
       .from("therapists")
       .select(
-        "id, wallet_address, full_name, legal_name, specialty, clinical_specialty, bio, languages, supported_modes, is_online, rating, availability, availability_text",
+        "id, wallet_address, full_name, legal_name, specialty, clinical_specialty, bio, languages, supported_modes, is_online, rating",
       )
       .order("is_online", { ascending: false })
-      .order("rating", { ascending: false });
+      .order("rating", { ascending: false })
+      .limit(20);
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    const therapists = (data ?? []).map((therapist) => ({
-      id: therapist.id,
-      name: getTherapistDisplayName(therapist),
-      specialty: getTherapistDisplaySpecialty(therapist),
-      languages: normalizeLanguages(therapist.languages),
-      bio: therapist.bio ?? "",
-      isOnline: Boolean(therapist.is_online),
-      rating: Number(therapist.rating ?? 0),
-      availability:
-        therapist.availability ??
-        therapist.availability_text ??
-        "Availability unavailable",
-      mode: "Video",
-      walletAddress: therapist.wallet_address ?? "",
-      supportedModes: normalizeSupportedModes(therapist.supported_modes),
-    }));
+    const therapists = (data ?? []).map((therapist) => {
+      const supportedModes = normalizeSupportedModes(therapist.supported_modes);
+
+      return {
+        id: therapist.id,
+        name: getTherapistDisplayName(therapist),
+        specialty: getTherapistDisplaySpecialty(therapist),
+        languages: normalizeLanguages(therapist.languages),
+        bio: therapist.bio ?? "",
+        isOnline: Boolean(therapist.is_online),
+        rating: Number(therapist.rating ?? 0),
+        availability: Boolean(therapist.is_online)
+          ? "Available now"
+          : "Currently offline",
+        mode: supportedModes.includes("Video") ? "Video" : "Text",
+        walletAddress: therapist.wallet_address ?? "",
+        supportedModes,
+      };
+    });
 
     return NextResponse.json({ data: therapists });
   } catch (error) {
